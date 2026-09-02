@@ -1,0 +1,112 @@
+tonic:
+  header: "import deprl, gym, sconegym, sconegym_crutch_v3"
+
+  agent: >
+    deprl.custom_agents.dep_factory(
+      3,
+      deprl.custom_mpo_torch.TunedMPO()
+    )(
+      replay=deprl.custom_replay_buffers.AdaptiveEnergyBuffer(
+        return_steps=1,
+        batch_size=256,
+        steps_between_batches=1000,
+        batch_iterations=30,
+        steps_before_batches=200000,
+        num_acts=9
+      )
+    )
+
+  environment: >
+    deprl.environments.Gym(
+      'sconewalk_rajagopal_crutch_v3_stage2d_posture_fix-v1',
+      scaled_actions=False
+    )
+
+  before_training: >
+    agent.load(
+      r'C:\Users\FUM Care\Documents\SCONE\results\rajagopal_STAGE2_TINY_FORWARD_CRUTCH_v2\260901.235148.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_8400000',
+      only_checkpoint=True
+    )
+  after_training: ''
+
+  test_environment: >
+    deprl.environments.Gym(
+      'sconewalk_rajagopal_crutch_v3_stage2d_posture_fix-v1',
+      scaled_actions=False
+    )
+
+  checkpoint: last
+  full_save: 1
+  name: rajagopal_STAGE2D_POSTURE_FIX_v1
+  resume: false
+  seed: 0
+  parallel: 20
+  sequential: 10
+
+  trainer: >
+    deprl.custom_trainer.Trainer(
+      steps=int(10000000),
+      epoch_steps=int(100000),
+      save_steps=int(100000)
+    )
+
+working_dir: IGNORED_FOR_HYFYDY
+
+env_args:
+  initial_forward_velocity: 0.0
+  initial_forward_velocity_std: 0.0
+  reset_position_std: 0.005
+  reset_velocity_std: 0.005
+  init_load: 0.5
+
+  alive_reward_coeff: 0.15
+  height_reward_coeff: 0.20
+  posture_reward_coeff: 0.45
+
+  crutch_reward_coeff: 0.15
+  cane_target_load_fraction: 0.08
+  cane_load_sigma_fraction: 0.15
+
+  crutch_forward_reward_coeff: 0.20
+  crutch_forward_margin: 0.05
+  crutch_forward_sigma: 0.10
+  init_load: 0.4
+
+  pelvis_forward_reward_coeff: 0.15
+  pelvis_lag_penalty_coeff: 0.20
+  
+
+  velocity_reward_coeff: 0.25
+  target_vel: 0.03
+  velocity_sigma_fraction: 0.7
+
+  displacement_reward_coeff: 0.05
+  target_displacement_cap: 0.5
+
+  backward_penalty_coeff: 0.45
+
+  fall_penalty: 5.0
+
+  pelvis_tilt_sigma: 0.15
+  lumbar_sigma: 0.18
+  hip_knee_posture_sigma: 0.35
+  height_drop_sigma: 0.18
+
+  episode_steps: 1000
+  action_rate_limit: 0.05
+
+DEP:
+  bias_rate: .002
+  buffer_size: 200
+  intervention_length: 8
+  intervention_proba: .0005
+  kappa: 50
+  normalization: independent
+  q_norm_selector: l2
+  regularization: 8
+  s4avg: 2
+  sensor_delay: 1
+  tau: 40
+  test_episode_every: 20
+  time_dist: 5
+  with_learning: true

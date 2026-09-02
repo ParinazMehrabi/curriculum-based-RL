@@ -1,0 +1,7 @@
+ModelHyfydy {
+    model_file = ../hfd/Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar.hfd
+    state_init_file = ../init_states/InitState_A0_walk_003_v2.zml
+
+    fixed_control_step_size = 0.005
+    initial_equilibration_activation = 0.05
+}

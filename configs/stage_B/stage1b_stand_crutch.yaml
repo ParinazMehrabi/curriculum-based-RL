@@ -1,0 +1,96 @@
+tonic:
+  header: "import deprl, gym, sconegym, sconegym_crutch_v3"
+
+  agent: >
+    deprl.custom_agents.dep_factory(
+      3,
+      deprl.custom_mpo_torch.TunedMPO()
+    )(
+      replay=deprl.custom_replay_buffers.AdaptiveEnergyBuffer(
+        return_steps=1,
+        batch_size=256,
+        steps_between_batches=1000,
+        batch_iterations=30,
+        steps_before_batches=200000,
+        num_acts=9
+      )
+    )
+
+  environment: >
+    deprl.environments.Gym(
+      'sconewalk_rajagopal_crutch_v3_stage1b_stand_crutch-v1',
+      scaled_actions=False
+    )
+
+  test_environment: null
+
+  # IMPORTANT: replace this path with wherever step_2900000.pt (or
+  # step_2800000.pt) actually landed on disk from the Stage 1 run --
+  # this is the checkpoint from the stable "episode length == 1000, std==0"
+  # window, not the most recent Stage 1 checkpoint. Continuing training
+  # unconditionally to whatever the *latest* Stage 1 checkpoint is would
+  # inherit whatever oscillating/unstable state it happened to be in.
+  before_training: >
+    agent.load(r'C:\Users\FUM Care\Documents\SCONE\results\rajagopal_STAGE1_STANDING_v1\260901.104011.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_5000000', only_checkpoint=True)
+  after_training: ''
+
+  checkpoint: last
+  full_save: 1
+
+  name: rajagopal_STAGE1b_STAND_CRUTCH_v1
+  resume: false
+  seed: 0
+  parallel: 20
+  sequential: 10
+
+  trainer: >
+    deprl.custom_trainer.Trainer(
+      steps=int(10000000),
+      epoch_steps=int(100000),
+      save_steps=int(100000)
+    )
+
+working_dir: IGNORED_FOR_HYFYDY
+
+env_args:
+  initial_forward_velocity: 0.0
+  initial_forward_velocity_std: 0.0
+  reset_position_std: 0.005
+  reset_velocity_std: 0.005
+  init_load: 0.5
+
+  alive_reward_coeff: 0.20
+  height_reward_coeff: 0.25
+  posture_reward_coeff: 0.45
+  crutch_reward_coeff: 0.25
+  cane_target_load_fraction: 0.15
+  cane_load_sigma_fraction: 0.15
+
+  # still no locomotion reward -- one new axis (crutch load) at a time
+  velocity_reward_coeff: 0.0
+  displacement_reward_coeff: 0.0
+  backward_penalty_coeff: 0.0
+
+  fall_penalty: 5.0
+
+  pelvis_tilt_sigma: 0.12
+  lumbar_sigma: 0.12
+
+  episode_steps: 1000
+  action_rate_limit: 0.05
+
+DEP:
+  bias_rate: .002
+  buffer_size: 200
+  intervention_length: 8
+  intervention_proba: .0005
+  kappa: 50
+  normalization: independent
+  q_norm_selector: l2
+  regularization: 8
+  s4avg: 2
+  sensor_delay: 1
+  tau: 40
+  test_episode_every: 20
+  time_dist: 5
+  with_learning: true

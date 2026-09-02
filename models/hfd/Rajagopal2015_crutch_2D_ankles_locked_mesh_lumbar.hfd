@@ -1,0 +1,424 @@
+model {
+	material {
+		name = default_material
+		static_friction = 0.9
+		dynamic_friction = 0.6
+		stiffness = 11006.4
+		damping = 1
+	}
+	model_options {
+		joint_stiffness = 1e+06
+		joint_limit_stiffness = 500
+	}
+
+	# ── Root body ──────────────────────────────────────────────────────────────
+	body {
+		name = ground
+		mass = 0
+		inertia { x = 0 y = 0 z = 0 }
+	}
+	# Pelvis is the free root; pos = COM offset in body frame
+	body {
+		name = pelvis
+		mass = 9.888
+		inertia { x = 0.0874 y = 0.0874 z = 0.0507 }
+		pos { x = -0.0707 y = 0 z = 0 }
+		mesh { file = sacrum.vtp pos { x = 0.0707 y = 0 z = 0 } }
+		mesh { file = r_pelvis.vtp pos { x = 0.0707 y = 0 z = 0 } }
+		mesh { file = l_pelvis.vtp pos { x = 0.0707 y = 0 z = 0 } }
+	}
+
+	# ── Right leg ──────────────────────────────────────────────────────────────
+	body {
+		name = femur_r
+		mass = 7.810
+		inertia { x = 0.1080 y = 0.0283 z = 0.1139 }
+		joint {
+			name = hip_r
+			parent = pelvis
+			# pos_in_parent = hip_joint_in_pelvis_frame − pelvis_COM
+			pos_in_parent { x = 0.0144 y = -0.0819 z = 0.0773 }
+			# pos_in_child  = hip_joint_in_femur_frame  − femur_COM
+			pos_in_child  { x = 0 y = 0.1666 z = 0 }
+			limits { x = 0..0 y = 0..0 z = -40..40 }
+		}
+		mesh { file = femur_r.vtp pos { x = 0 y = 0.1666 z = 0 } }
+	}
+	body {
+		name = tibia_r
+		mass = 3.113
+		inertia { x = 0.0425 y = 0.0043 z = 0.0431 }
+		joint {
+			name = knee_r
+			parent = femur_r
+			pos_in_parent { x = -0.0079 y = -0.2332 z = -0.0027 }
+			pos_in_child  { x = -0.0081 y = 0.1836 z = -0.0015 }
+			limits { x = 0..0 y = 0..0 z = -120..5 }
+		}
+		mesh { file = tibia_r.vtp pos { x = -0.0081 y = 0.1836 z = -0.0015 } }
+		mesh { file = fibula_r.vtp pos { x = -0.0081 y = 0.1836 z = -0.0015 } }
+	}
+	# calcn_r: talus merged in (subtalar locked). Mass & COM are weighted average.
+	# Ankle joint goes tibia → calcn directly.
+	body {
+		name = calcn_r
+		mass = 1.134
+		inertia { x = 0.0022 y = 0.0047 z = 0.0053 }
+		joint {
+			name = ankle_r
+			parent = tibia_r
+			# Ankle center in tibia frame − tibia COM
+			pos_in_parent { x = -0.0100 y = -0.2137 z = 0 }
+			# Ankle center in calcn frame − calcn+talus merged COM
+			pos_in_child  { x = -0.0556 y = 0.0086 z = 0 }
+			limits { x = 0..0 y = 0..0 z = 0..0 }
+		}
+		mesh { file = r_foot.vtp pos { x = -0.0556 y = 0.0086 z = 0 } }
+		mesh { file = r_talus.vtp pos { x = -0.0556 y = 0.0086 z = 0 } }
+	}
+	body {
+		name = toes_r
+		mass = 0.182
+		inertia { x = 0.0001 y = 0.0002 z = 0.0010 }
+		joint {
+			name = mtp_r
+			parent = calcn_r
+			pos_in_parent { x = 0.0902 y = -0.0356 z = 0 }
+			pos_in_child  { x = -0.0377 y = -0.0065 z = 0 }
+			limits { x = 0..0 y = 0..0 z = 0..0 }
+		}
+		mesh { file = r_bofoot.vtp pos { x = -0.0377 y = -0.0065 z = 0 } }
+	}
+
+	# ── Left leg ───────────────────────────────────────────────────────────────
+	body {
+		name = femur_l
+		mass = 7.810
+		inertia { x = 0.1098 y = 0.0288 z = 0.1157 }
+		joint {
+			name = hip_l
+			parent = pelvis
+			pos_in_parent { x = 0.0144 y = -0.0819 z = -0.0773 }
+			pos_in_child  { x = 0 y = 0.1680 z = 0 }
+			limits { x = 0..0 y = 0..0 z = -40..40 }
+		}
+		mesh { file = femur_l.vtp pos { x = 0 y = 0.1680 z = 0 } }
+	}
+	body {
+		name = tibia_l
+		mass = 3.113
+		inertia { x = 0.0418 y = 0.0042 z = 0.0424 }
+		joint {
+			name = knee_l
+			parent = femur_l
+			pos_in_parent { x = -0.0080 y = -0.2351 z = 0.0027 }
+			pos_in_child  { x = -0.0080 y = 0.1820 z = 0.0015 }
+			limits { x = 0..0 y = 0..0 z = -120..5 }
+		}
+		mesh { file = tibia_l.vtp pos { x = -0.0080 y = 0.1820 z = 0.0015 } }
+		mesh { file = fibula_l.vtp pos { x = -0.0080 y = 0.1820 z = 0.0015 } }
+	}
+	body {
+		name = calcn_l
+		mass = 1.134
+		inertia { x = 0.0021 y = 0.0046 z = 0.0052 }
+		joint {
+			name = ankle_l
+			parent = tibia_l
+			pos_in_parent { x = -0.0099 y = -0.2119 z = 0 }
+			pos_in_child  { x = -0.0536 y = 0.0092 z = 0 }
+			limits { x = 0..0 y = 0..0 z = 0..0 }
+		}
+		mesh { file = l_foot.vtp pos { x = -0.0536 y = 0.0092 z = 0 } }
+		mesh { file = l_talus.vtp pos { x = -0.0536 y = 0.0092 z = 0 } }
+	}
+	body {
+		name = toes_l
+		mass = 0.182
+		inertia { x = 0.0001 y = 0.0002 z = 0.0010 }
+		joint {
+			name = mtp_l
+			parent = calcn_l
+			pos_in_parent { x = 0.0888 y = -0.0349 z = 0 }
+			pos_in_child  { x = -0.0370 y = -0.0064 z = 0 }
+			limits { x = 0..0 y = 0..0 z = 0..0 }
+		}
+		mesh { file = l_bofoot.vtp pos { x = -0.0370 y = -0.0064 z = 0 } }
+	}
+
+	# ── Torso (back = lumbar_extension, sagittal-plane flexion/extension) ─────
+	body {
+		name = torso
+		mass = 22.524
+		inertia { x = 1.238 y = 0.634 z = 1.202 }
+		joint {
+			name = back
+			parent = pelvis
+			pos_in_parent { x = -0.0300 y = 0.0850 z = 0 }
+			pos_in_child  { x = 0.030 y = -0.320 z = 0 }
+			# z range matches lumbar_extension in Rajagopal_with_Actuators.osim (-1.5708..1.5708 rad)
+			limits { x = 0..0 y = 0..0 z = -90..90 }
+		}
+		mesh { file = hat_spine.vtp pos { x = 0.030 y = -0.320 z = 0 } }
+		mesh { file = hat_jaw.vtp pos { x = 0.030 y = -0.320 z = 0 } }
+		mesh { file = hat_skull.vtp pos { x = 0.030 y = -0.320 z = 0 } }
+		mesh { file = hat_ribs.vtp pos { x = 0.030 y = -0.320 z = 0 } }
+	}
+
+	# ── Right arm + crutch ────────────────────────────────────────────────────
+	body {
+		name = humerus_r
+		mass = 1.707
+		inertia { x = 0.01003 y = 0.00346 z = 0.01126 }
+		joint {
+			name = shoulder_r
+			parent = torso
+			pos_in_parent { x = 0.0332 y = 0.0515 z = 0.1700 }
+			pos_in_child  { x = 0 y = 0.1645 z = 0 }
+			limits { x = 0..0 y = 0..0 z = -90..90 }
+		}
+		mesh { file = humerus_rv.vtp pos { x = 0 y = 0.1645 z = 0 } }
+	}
+	# forearm_r = ulna + radius + hand merged (radioulnar & wrist locked)
+	# mass = 0.510+0.510+0.384 = 1.404 kg, COM ≈ 0.179 m below elbow
+	body {
+		name = forearm_r
+		mass = 1.404
+		inertia { x = 0.010 y = 0.002 z = 0.021 }
+		joint {
+			name = elbow_r
+			parent = humerus_r
+			pos_in_parent { x = 0.0131 y = -0.1218 z = 0 }
+			pos_in_child  { x = 0.007 y = 0.179 z = 0 }
+			limits { x = 0..0 y = 0..0 z = 0..150 }
+		}
+		mesh { file = radius_rv.vtp pos { x = 0.007 y = 0.179 z = 0 } }
+		mesh { file = ulna_rv.vtp pos { x = 0.007 y = 0.179 z = 0 } }
+		mesh { file = pisiform_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = lunate_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = scaphoid_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = triquetrum_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = hamate_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = capitate_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = trapezoid_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = trapezium_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = metacarpal2_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = index_proximal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = index_medial_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = index_distal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = metacarpal3_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = middle_proximal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = middle_medial_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = middle_distal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = metacarpal4_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = ring_proximal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = ring_medial_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = ring_distal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = metacarpal5_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = little_proximal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = little_medial_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = little_distal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = metacarpal1_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = thumb_proximal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+		mesh { file = thumb_distal_rvs.vtp pos { x = -0.0018 y = -0.0568 z = 0.0136 } ori { x = -90 y = 0 z = -90 } }
+	}
+	# Crutch_r welded to forearm at the wrist/hand grip point (same anchor as the hand meshes above)
+	# Native STL length (1.1233 total) overshoots the ground ~0.15m even at full arm extension for
+	# this skeleton's proportions, so grip distance, tip distance and mesh are all scaled by 0.866
+	# together (previously only the mesh was scaled, leaving contact geometry at the unscaled length)
+	body {
+		name = Crutch_r
+		mass = 0.613
+		inertia { x = 0.0496 y = 0.001 z = 0.0496 }
+		joint {
+			name = crutch_weld_r
+			parent = forearm_r
+			# ~30% of the way down the forearm from the elbow (elbow=0.007,0.179,0 / wrist=-0.0018,-0.0568,0.0136)
+			# - upper-forearm cuff attachment, shortens the arm+crutch reach so the tip doesn't
+			# reach the ground before the (crouched, ankles-locked-init) feet do
+			pos_in_parent { x = 0.0044 y = 0.1083 z = 0.0041 }
+			pos_in_child  { x = 0 y = 0.3019 z = 0 }
+			limits { x = 0..0 y = 0..0 z = 0..0 }
+		}
+		mesh { file = ../Crutceh.STL pos { x = 0 y = 0 z = 0 } scale = { x = 0.866 y = 0.866 z = 0.866 } }
+	}
+
+	# ── Left arm + crutch ─────────────────────────────────────────────────────
+	body {
+		name = humerus_l
+		mass = 1.707
+		inertia { x = 0.01003 y = 0.00346 z = 0.01126 }
+		joint {
+			name = shoulder_l
+			parent = torso
+			pos_in_parent { x = 0.0332 y = 0.0515 z = -0.1700 }
+			pos_in_child  { x = 0 y = 0.1645 z = 0 }
+			limits { x = 0..0 y = 0..0 z = -90..90 }
+		}
+		mesh { file = humerus_lv.vtp pos { x = 0 y = 0.1645 z = 0 } }
+	}
+	body {
+		name = forearm_l
+		mass = 1.404
+		inertia { x = 0.010 y = 0.002 z = 0.021 }
+		joint {
+			name = elbow_l
+			parent = humerus_l
+			pos_in_parent { x = 0.0131 y = -0.1218 z = 0 }
+			pos_in_child  { x = 0.007 y = 0.179 z = 0 }
+			limits { x = 0..0 y = 0..0 z = 0..150 }
+		}
+		mesh { file = radius_lv.vtp pos { x = 0.007 y = 0.179 z = 0 } }
+		mesh { file = ulna_lv.vtp pos { x = 0.007 y = 0.179 z = 0 } }
+		mesh { file = pisiform_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = lunate_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = scaphoid_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = triquetrum_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = hamate_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = capitate_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = trapezoid_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = trapezium_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = metacarpal2_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = index_proximal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = index_medial_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = index_distal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = metacarpal3_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = middle_proximal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = middle_medial_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = middle_distal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = metacarpal4_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = ring_proximal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = ring_medial_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = ring_distal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = metacarpal5_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = little_proximal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = little_medial_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = little_distal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = metacarpal1_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = thumb_proximal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+		mesh { file = thumb_distal_lvs.vtp pos { x = -0.0018 y = -0.0568 z = -0.0136 } ori { x = 90 y = 0 z = 90 } }
+	}
+	body {
+		name = Crutch_l
+		mass = 0.613
+		inertia { x = 0.0492 y = 0.001 z = 0.0492 }
+		joint {
+			name = crutch_weld_l
+			parent = forearm_l
+			pos_in_parent { x = 0.0044 y = 0.1083 z = -0.0041 }
+			pos_in_child  { x = 0 y = 0.3007 z = 0 }
+			limits { x = 0..0 y = 0..0 z = 0..0 }
+		}
+		mesh { file = ../Crutceh.STL pos { x = 0 y = 0 z = 0 } scale = { x = 0.866 y = 0.866 z = 0.866 } }
+	}
+
+	# ── Joint motors (required for DofReflex torque application) ─────────────
+	joint_motor { joint = hip_r      stiffness = 0  damping = 0  max_torque = 1000 }
+	joint_motor { joint = knee_r     stiffness = 0  damping = 0  max_torque = 1000 }
+	# ankle_r motor removed — joint is locked
+	# mtp_r motor removed - joint is locked
+	joint_motor { joint = hip_l      stiffness = 0  damping = 0  max_torque = 1000 }
+	joint_motor { joint = knee_l     stiffness = 0  damping = 0  max_torque = 1000 }
+	# ankle_l motor removed — joint is locked
+	# mtp_l motor removed - joint is locked
+	# no optimal_force reference exists for lumbar in Rajagopal_with_Actuators.osim (passive-only there);
+	# max_torque chosen to match hip/knee headroom — tune once controller gains are optimized
+	joint_motor { joint = back       stiffness = 0  damping = 0  max_torque = 1000 }
+	# shoulder/elbow damping ~5 Nm.s/rad is close to critical damping for these segments'
+	# inertia at KP=80 (c_crit = 2*sqrt(KP*I) ~ 4.3-4.6) - this acts undelayed, unlike the
+	# reflex's KV term, so it directly counters delay-driven oscillation ("hand shaking")
+	joint_motor { joint = shoulder_r stiffness = 0  damping = 5  max_torque = 500  }
+	joint_motor { joint = elbow_r    stiffness = 0  damping = 5  max_torque = 300  }
+	joint_motor { joint = shoulder_l stiffness = 0  damping = 5  max_torque = 500  }
+	joint_motor { joint = elbow_l    stiffness = 0  damping = 5  max_torque = 300  }
+
+	# ── Contact geometry ──────────────────────────────────────────────────────
+	geometry {
+		name = platform
+		type = plane
+		normal { x = -1 y = 0 z = 0 }
+		body = ground
+		pos { x = 0 y = 0 z = 0 }
+		ori { x = 0 y = 0 z = -90 }
+	}
+	# Heel/toe contacts - copied exactly from Models/h0918-ankles-locked.hfd (same body/pos/radius).
+	# Toe moved from toes_r/l onto calcn_r/l to match h0918's contact structure (h0918 has no
+	# separate toes segment; the mtp joint here is locked 0..0 anyway, so this changes nothing
+	# kinematically, only which body the contact sphere is defined relative to).
+	geometry {
+		name = heel_r
+		type = sphere
+		radius = 0.03
+		body = calcn_r
+		pos { x = -0.085 y = -0.015 z = -0.005 }
+		ori { x = 0 y = 0 z = 0 }
+	}
+	geometry {
+		name = toe_r
+		type = sphere
+		radius = 0.03
+		body = calcn_r
+		pos { x = 0.085 y = -0.015 z = 0 }
+		ori { x = 0 y = 0 z = 0 }
+	}
+	geometry {
+		name = heel_l
+		type = sphere
+		radius = 0.03
+		body = calcn_l
+		pos { x = -0.085 y = -0.015 z = 0.005 }
+		ori { x = 0 y = 0 z = 0 }
+	}
+	geometry {
+		name = toe_l
+		type = sphere
+		radius = 0.03
+		body = calcn_l
+		pos { x = 0.085 y = -0.015 z = 0 }
+		ori { x = 0 y = 0 z = 0 }
+	}
+	# Crutch tip contacts (positions in Crutch body frame, COM = body origin)
+	geometry {
+		name = crutch_tip_r
+		type = sphere
+		radius = 0.032
+		body = Crutch_r
+		pos { x = 0.0087 y = -0.6408 z = 0 }
+		ori { x = 0 y = 0 z = 0 }
+	}
+	geometry {
+		name = crutch_tip_l
+		type = sphere
+		radius = 0.032
+		body = Crutch_l
+		pos { x = 0.0087 y = -0.6408 z = 0 }
+		ori { x = 0 y = 0 z = 0 }
+	}
+
+	# ── DOF declarations ──────────────────────────────────────────────────────
+	dof { name = pelvis_tilt   source = pelvis_rz       range = -90..90          }
+	dof { name = pelvis_tx     source = pelvis_tx       range = -5..5            }
+	dof { name = pelvis_ty     source = pelvis_ty       range = -1..2   default = 0.94 }
+	# default < 0 = forward trunk lean (OpenSim sign convention: negative lumbar_extension = flexion)
+	# was -0.20 (too hunched at rest - well beyond any controller state's own P0 target of -0.08..0.00)
+	dof { name = lumbar_extension source = back_rz     range = -90..90   default = -0.05 }
+	dof { name = hip_flexion_r source = hip_rz_r        range = -40..40          }
+	dof { name = knee_angle_r  source = knee_rz_r       range = -120..5          }
+	dof { name = ankle_angle_r source = ankle_rz_r      range = 0..0             }
+	dof { name = mtp_angle_r   source = mtp_rz_r        range = 0..0             }
+	dof { name = hip_flexion_l source = hip_rz_l        range = -40..40          }
+	dof { name = knee_angle_l  source = knee_rz_l       range = -120..5          }
+	dof { name = ankle_angle_l source = ankle_rz_l      range = 0..0             }
+	dof { name = mtp_angle_l   source = mtp_rz_l        range = 0..0             }
+	# defaults match the controller's EarlyStance equilibrium (crutch planted, ready to bear weight)
+	# so the sim starts near that pose instead of snapping to it from arms-straight-down at t=0
+	dof { name = arm_flex_r    source = shoulder_rz_r   range = -90..90          default = 0.30 }
+	dof { name = elbow_flex_r  source = elbow_rz_r      range = 0..150           default = 0.80 }
+	dof { name = arm_flex_l    source = shoulder_rz_l   range = -90..90          default = 0.30 }
+	dof { name = elbow_flex_l  source = elbow_rz_l      range = 0..150           default = 0.80 }
+}
+
+
+
+
+

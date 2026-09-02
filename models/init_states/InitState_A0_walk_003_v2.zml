@@ -1,0 +1,37 @@
+values {
+    pelvis_tilt = -0.03
+    pelvis_tx = 0
+    pelvis_ty = 0.94
+
+    lumbar_extension = -0.05
+
+    hip_flexion_r = 0.15
+    knee_angle_r = -0.15
+    hip_flexion_l = 0.15
+    knee_angle_l = -0.15
+
+    # Neutral upper-body pose only.
+    # This is NOT a planted-crutch or cane-contact initial state.
+    arm_flex_r = 0.0
+    elbow_flex_r = 0.30
+    arm_flex_l = 0.0
+    elbow_flex_l = 0.30
+}
+
+velocities {
+    pelvis_tilt = 0
+    pelvis_tx = 0.02
+    pelvis_ty = 0
+
+    lumbar_extension = 0
+
+    hip_flexion_r = 0
+    knee_angle_r = 0
+    hip_flexion_l = 0
+    knee_angle_l = 0
+
+    arm_flex_r = 0
+    elbow_flex_r = 0
+    arm_flex_l = 0
+    elbow_flex_l = 0
+}
