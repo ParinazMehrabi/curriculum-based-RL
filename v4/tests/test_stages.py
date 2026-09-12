@@ -279,3 +279,76 @@ def test_overridden_stage_stays_reward_safe():
     stage = STAGES["D"].with_overrides(alive=0.05, w_backward=1.0)
     assert stage.reward.min_step_reward() >= 0.0
     assert stage.reward.termination_report()["termination_preferred"] is False
+
+
+# -- deprl info-dict contract -----------------------------------------------
+
+
+def test_info_keys_are_pinned_to_the_v3_set():
+    """The eight keys v3 emitted, fixed and stage-independent.
+
+    deprl's test_scone pre-allocates rwd_metrics and indexes it by the keys in
+    info; it does not read REWARD_KEYS. Two runs died at the end of their first
+    epoch because v4 emitted a stage-dependent set. v3 trained to millions of
+    steps with exactly these, so the set must not drift.
+    """
+    src = env_source()
+    tree = ast.parse(src)
+    found = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "V3_INFO_KEYS":
+                    found = [e.value for e in node.value.elts]
+    assert found is not None, "V3_INFO_KEYS not found in env.py"
+    assert found == [
+        "alive",
+        "height",
+        "posture",
+        "crutch",
+        "velocity",
+        "backward",
+        "displacement",
+        "total",
+    ]
+
+
+def test_step_builds_info_from_the_pinned_set():
+    """step() must go through _legacy_info, not splat rwd_dict directly."""
+    src = env_source()
+    assert "info.update(self._legacy_info())" in src
+    assert "info.update(self.rwd_dict" not in src
+
+
+def test_v4_only_terms_stay_out_of_info():
+    """crutch_forward, pelvis_lag and pelvis_forward have no v3 slot.
+
+    They remain on env.term_values; putting them in info would reintroduce the
+    KeyError this contract exists to prevent.
+    """
+    src = env_source()
+    tree = ast.parse(src)
+    pinned = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "V3_INFO_KEYS":
+                    pinned = {e.value for e in node.value.elts}
+    for term in ("crutch_forward", "pelvis_lag", "pelvis_forward"):
+        assert term not in pinned, term
+
+
+def test_every_stage_term_is_either_pinned_or_deliberately_excluded():
+    """No stage may weight a term that silently vanishes from logging."""
+    src = env_source()
+    tree = ast.parse(src)
+    pinned = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "V3_INFO_KEYS":
+                    pinned = {e.value for e in node.value.elts}
+    excluded = {"crutch_forward", "pelvis_lag", "pelvis_forward"}
+    for key, stage in STAGES.items():
+        for term in stage.reward.active_weights:
+            assert term in pinned or term in excluded, (key, term)

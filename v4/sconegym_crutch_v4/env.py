@@ -46,6 +46,30 @@ PELVIS_BODY_NAME = "pelvis"
 
 DEFAULT_MODEL = "Rajagopal_crutch_v3_A0_walk_003.scone"
 
+# The exact key set v3 put in `info`, in v3's order.
+#
+# This is a compatibility contract, not a design choice. deprl's test_scone
+# pre-allocates rwd_metrics and indexes it by the keys it finds in info; it does
+# not read REWARD_KEYS. Two v4 runs died at the end of their first epoch --
+# KeyError 'term_height', then KeyError 'height' -- because v4 emitted a
+# stage-dependent key set while v3 always emitted these eight regardless of
+# stage, with zeros for the terms a stage did not weight.
+#
+# v3 trained to 5M, 4.7M and 8.4M steps with exactly these keys, so they are
+# known to work. Terms v4 added that v3 never emitted (crutch_forward,
+# pelvis_lag, pelvis_forward) stay out of info and are available on
+# `env.term_values` instead.
+V3_INFO_KEYS = (
+    "alive",
+    "height",
+    "posture",
+    "crutch",
+    "velocity",
+    "backward",
+    "displacement",
+    "total",
+)
+
 
 class CrutchCurriculumGym(GaitGym):
     """Torque-actuated 2D Rajagopal model with welded crutches."""
@@ -439,7 +463,7 @@ class CrutchCurriculumGym(GaitGym):
         self.total_reward += reward
 
         info = {"curriculum_stage": self.curriculum_stage}
-        info.update(self.rwd_dict or {})
+        info.update(self._legacy_info())
 
         if done:
             if self.store_next:
@@ -639,6 +663,17 @@ class CrutchCurriculumGym(GaitGym):
         )
         return float(total)
 
+    def _legacy_info(self) -> Dict[str, float]:
+        """The eight v3 keys, zero-filled for terms this stage does not weight.
+
+        See V3_INFO_KEYS for why the set is fixed rather than stage-dependent.
+        """
+        out = {k: 0.0 for k in V3_INFO_KEYS}
+        for key, value in (self.rwd_dict or {}).items():
+            if key in out:
+                out[key] = float(value)
+        return out
+
     @property
     def REWARD_KEYS(self) -> tuple:
         """The keys `rwd_dict` will contain, in a stable order.
@@ -648,12 +683,7 @@ class CrutchCurriculumGym(GaitGym):
         exactly. v3 declared this as a static class attribute; here it is
         derived from the stage so the two cannot drift apart.
         """
-        spec = self.stage_spec.reward
-        keys = list(spec.required_terms) + ["alive"]
-        if spec.legacy_penalties:
-            keys.append("legacy_penalty")
-        keys.append("total")
-        return tuple(keys)
+        return V3_INFO_KEYS
 
     def get_rwd_dict(self) -> Dict[str, float]:
         if self.rwd_dict is None:
