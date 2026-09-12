@@ -40,6 +40,11 @@ REPO_V4 = Path(__file__).resolve().parents[1]
 FIGURE_DIR = REPO_V4 / "notebooks" / "figures"
 RESULT_DIR = REPO_V4 / "notebooks" / "results"
 
+# Make `import sconegym_crutch_v4` work however this file was invoked: as a
+# script, as a module, or from the notebook one directory down.
+if str(REPO_V4) not in sys.path:
+    sys.path.insert(0, str(REPO_V4))
+
 STAGE_COLOURS = {"A": "#378ADD", "B": "#1D9E75", "C": "#BA7517", "D": "#D4537E"}
 
 

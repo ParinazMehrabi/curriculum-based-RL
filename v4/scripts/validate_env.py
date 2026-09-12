@@ -16,6 +16,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
+
+# Make `import sconegym_crutch_v4` work however this file was invoked.
+REPO_V4 = Path(__file__).resolve().parents[1]
+if str(REPO_V4) not in sys.path:
+    sys.path.insert(0, str(REPO_V4))
 
 import numpy as np
 
