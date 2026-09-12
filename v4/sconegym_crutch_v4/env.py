@@ -29,6 +29,8 @@ from .rewards import gaussian, smoothstep
 from .stages import INIT_FRAME, StageSpec, get_stage
 from .trajectory import load_sto
 
+_RSI_BANNER_SHOWN = False
+
 POSTURE_DOFS = (
     "pelvis_tilt",
     "lumbar_extension",
@@ -168,7 +170,12 @@ class CrutchCurriculumGym(GaitGym):
             if not traj_path.is_absolute():
                 traj_path = Path(__file__).resolve().parents[2] / traj_path
             self.trajectory = load_sto(traj_path, self._dof_names)
-            print("[%s] RSI reference: %s" % (self.curriculum_stage, self.trajectory.describe()))
+            global _RSI_BANNER_SHOWN
+            if not _RSI_BANNER_SHOWN:
+                # One line per worker process, not per environment: a run with
+                # parallel=20 sequential=10 would otherwise print this 200 times.
+                _RSI_BANNER_SHOWN = True
+                print("[%s] RSI reference: %s" % (self.curriculum_stage, self.trajectory.describe()))
 
         # Posture and height references. For the non-RSI stages these reproduce
         # the previous behaviour exactly: trunk measured against upright, stance
@@ -626,6 +633,22 @@ class CrutchCurriculumGym(GaitGym):
         total, breakdown = self.stage_spec.reward.compose(self.term_values)
         self.rwd_dict = breakdown
         return float(total)
+
+    @property
+    def REWARD_KEYS(self) -> tuple:
+        """The keys `rwd_dict` will contain, in a stable order.
+
+        deprl's test_scone reads this to pre-allocate its metric buffers and
+        then indexes them by the keys it finds in `info`, so the two must agree
+        exactly. v3 declared this as a static class attribute; here it is
+        derived from the stage so the two cannot drift apart.
+        """
+        spec = self.stage_spec.reward
+        keys = list(spec.required_terms) + ["shaping", "alive"]
+        if spec.legacy_penalties:
+            keys.append("legacy_penalty")
+        keys.append("total")
+        return tuple(keys)
 
     def get_rwd_dict(self) -> Dict[str, float]:
         if self.rwd_dict is None:

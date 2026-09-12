@@ -187,9 +187,29 @@ def test_zero_floor_annihilates_and_nonzero_floor_does_not():
 def test_breakdown_carries_raw_terms():
     geo, _ = _farm_specs(0.05)
     _, breakdown = geo.compose({"height": 0.5, "posture": 0.6, "velocity": 0.7})
-    assert breakdown["term_height"] == pytest.approx(0.5)
-    assert breakdown["term_velocity"] == pytest.approx(0.7)
+    assert breakdown["height"] == pytest.approx(0.5)
+    assert breakdown["velocity"] == pytest.approx(0.7)
     assert "shaping" in breakdown and "total" in breakdown
+
+
+def test_breakdown_keys_are_unprefixed():
+    """deprl's test_scone indexes its metric buffers by these exact names.
+
+    A "term_" prefix here surfaced as KeyError: 'term_height' inside
+    custom_test_environment.py after a full epoch of training.
+    """
+    geo, _ = _farm_specs(0.05)
+    _, breakdown = geo.compose({"height": 1.0, "posture": 1.0, "velocity": 1.0})
+    assert not any(k.startswith("term_") for k in breakdown), sorted(breakdown)
+    assert set(geo.required_terms) <= set(breakdown)
+
+
+def test_breakdown_keys_match_declared_reward_keys():
+    """The env exposes REWARD_KEYS; it must agree with what compose emits."""
+    geo, _ = _farm_specs(0.05)
+    _, breakdown = geo.compose({"height": 1.0, "posture": 1.0, "velocity": 1.0})
+    declared = list(geo.required_terms) + ["shaping", "alive", "total"]
+    assert set(declared) == set(breakdown)
 
 
 def test_terms_are_clipped_into_unit_interval():

@@ -158,7 +158,10 @@ class RewardSpec:
 
         total = self.alive + self.shaping_scale * shaping - penalty
 
-        breakdown = {"term_" + k: v for k, v in raw.items()}
+        # Keys are the bare term names, matching the contract v3 used. deprl's
+        # test_scone pre-allocates rwd_metrics and indexes it by these keys, so a
+        # prefix here becomes a KeyError there rather than a missing metric.
+        breakdown = dict(raw)
         breakdown["shaping"] = float(shaping)
         breakdown["alive"] = float(self.alive)
         if self.legacy_penalties:
