@@ -1,5 +1,15 @@
 # Stage B -- standing with crutch load sharing. Warm-starts from stage A.
 #
+# Stage B uses the SAME reference-state initialisation as stage A (same
+# trajectory, velocity_scale 0.0, posture_reference "init"), so crutch load is
+# the only new axis. Stage A learned to hold the reference's forward-leaning
+# poses; resetting upright here and scoring posture against upright would change
+# the initial-state distribution, the posture reference and the reward at once.
+#
+# New this stage: crutch load sharing at 15% of body weight (95 N of 631 N),
+# sigma fraction 0.15, gated by a smoothstep over 10-30 N of contact force. The
+# environment refuses to construct if the crutch force API is not working.
+#
 # Stage configuration (reward weights, sigmas, reset distribution) lives in
 # sconegym_crutch_v4/stages.py, NOT in this file. v3 carried an env_args block
 # here, but nothing in the package ever read it and it was never confirmed that
@@ -51,9 +61,16 @@ tonic:
   #  2. The reward function changes at this boundary, so the critic arrives
   #     mis-calibrated. Expect a dip. A critic warm-up or return
   #     normalisation is the next thing worth adding here.
+  # Stage A run 260912.135956 plateaued near episode_score 550 with
+  # episode_length pinned at 1000: it holds all 301 reference poses for a full
+  # 10 s. step_5600000 scored 609 at length 1000 and sits inside a stable
+  # window, which is the selection criterion -- not the single best epoch
+  # (762 at 5.43M, which is not a save point anyway).
+  #
+  # VERIFY THIS PATH EXISTS FIRST. It is machine-specific, the same wart v3 had.
   before_training: >
     agent.load(
-      r'REPLACE_ME/checkpoints/stage_A/step_XXXXXXX',
+      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_A_stand\260912.135956.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_5600000',
       only_checkpoint=True
     )
   after_training: ''

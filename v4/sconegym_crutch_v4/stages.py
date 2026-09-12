@@ -300,6 +300,16 @@ STAGE_B = StageSpec(
         cane_target_load_fraction=0.15,
         cane_load_sigma_fraction=0.15,
     ),
+    # Same RSI setup as stage A, deliberately. Stage A learns to hold the
+    # reference's forward-leaning gait poses (tilt -0.34 to -0.55 rad); a stage B
+    # that reset upright and scored posture against an upright ideal would change
+    # the initial-state distribution, the posture reference and the reward all at
+    # once. Keeping RSI identical leaves crutch load as the single new axis.
+    rsi=RSIConfig(
+        trajectory="models/reference/gaitTracking_solution_raw.sto",
+        velocity_scale=0.0,
+        posture_reference=INIT_FRAME,
+    ),
 )
 
 # ---------------------------------------------------------------------------

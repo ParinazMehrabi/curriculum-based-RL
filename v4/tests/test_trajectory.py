@@ -184,8 +184,23 @@ def test_stage_a_uses_rsi_with_init_reference():
     assert rsi.velocity_scale == 0.0
 
 
-def test_only_stage_a_uses_rsi_for_now():
-    for key in ("B", "C", "D"):
+def test_stage_b_matches_stage_a_rsi():
+    """A and B must share an initial-state distribution.
+
+    Stage A learns to hold the reference's forward-leaning poses. If B reset
+    upright and scored posture against upright, the A->B transfer would change
+    the init distribution, the posture reference and the reward simultaneously.
+    """
+    a, b = stages.STAGES["A"].rsi, stages.STAGES["B"].rsi
+    assert b is not None
+    assert b.trajectory == a.trajectory
+    assert b.velocity_scale == a.velocity_scale
+    assert b.posture_reference == a.posture_reference
+    assert b.phase_range == a.phase_range
+
+
+def test_locomotion_stages_do_not_use_rsi_yet():
+    for key in ("C", "D"):
         assert stages.STAGES[key].rsi is None, key
 
 
