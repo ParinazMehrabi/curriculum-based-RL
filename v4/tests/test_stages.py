@@ -119,6 +119,76 @@ def test_stage_d_init_load_is_unambiguous():
     assert len({s.init_load for s in STAGES.values()}) == 1
 
 
+def test_neutral_pose_references_are_set():
+    """Measured by scripts/calibrate.py; zero is the wrong reference.
+
+    The calcn bodies sit ~0.10 m ahead of the pelvis body COM at rest and the
+    crutches ~0.05 m ahead, so terms that compared against 0 were constants.
+    """
+    t = stages.TermParams()
+    assert t.pelvis_foot_offset_ref == pytest.approx(0.101)
+    assert t.crutch_offset_ref == pytest.approx(0.052)
+
+
+def test_lag_terms_use_the_neutral_references():
+    """Guards against a regression to measuring against zero."""
+    src = env_source()
+    tree = ast.parse(src)
+    bodies = {
+        node.name: ast.get_source_segment(src, node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+    }
+    assert "pelvis_foot_offset_ref" in bodies["_term_pelvis_lag"]
+    assert "crutch_offset_ref" in bodies["_term_crutch_forward"]
+
+
+def test_neutral_pose_scores_one_for_both_lag_terms():
+    """At the measured neutral offsets neither term should penalise anything."""
+    t = stages.TermParams()
+
+    excess_lag = t.pelvis_foot_offset_ref - t.pelvis_foot_offset_ref
+    assert rewards.gaussian(max(0.0, excess_lag), t.pelvis_lag_sigma) == pytest.approx(1.0)
+
+    shortfall = (t.crutch_offset_ref - t.crutch_offset_ref) - t.crutch_forward_margin
+    assert rewards.gaussian(max(0.0, shortfall), t.crutch_forward_sigma) == pytest.approx(1.0)
+
+
+def test_lag_terms_discriminate_away_from_neutral():
+    """Moving away from neutral must actually cost something."""
+    t = stages.TermParams()
+
+    # feet 5 cm further ahead of the pelvis than at rest
+    lag = (t.pelvis_foot_offset_ref + 0.05) - t.pelvis_foot_offset_ref
+    assert 0.1 < rewards.gaussian(lag, t.pelvis_lag_sigma) < 0.6
+
+    # crutch 5 cm behind where it rests
+    shortfall = (t.crutch_offset_ref - (t.crutch_offset_ref - 0.05)) - t.crutch_forward_margin
+    assert 0.1 < rewards.gaussian(max(0.0, shortfall), t.crutch_forward_sigma) < 0.9
+
+
+def test_stage_d_drops_the_dead_progress_term():
+    """pelvis_forward measured a flat 0.0 for a whole episode; it is gone."""
+    assert "pelvis_forward" not in STAGES["D"].reward.active_weights
+    for key, stage in STAGES.items():
+        assert "pelvis_forward" not in stage.reward.active_weights, key
+
+
+def test_stage_d_velocity_target_is_reachable_at_reset():
+    """D asked for 0.03 m/s from a standstill; velocity never exceeded 0.043."""
+    d = STAGES["D"]
+    assert d.initial_forward_velocity > 0.0
+    # Within one sigma of the target at reset, so step 1 is not already a loss.
+    assert abs(d.initial_forward_velocity - d.target_vel) < d.velocity_sigma
+
+
+def test_stage_d_crutch_sigma_matches_stage_c():
+    """The tighter sigma capped D's crutch term at 0.22 against C's 0.97."""
+    assert STAGES["D"].terms.cane_load_sigma_fraction == pytest.approx(
+        STAGES["C"].terms.cane_load_sigma_fraction
+    )
+
+
 def test_crutch_gate_opens_below_the_target_load():
     """The smooth gate must be fully open at the stage's target crutch load.
 

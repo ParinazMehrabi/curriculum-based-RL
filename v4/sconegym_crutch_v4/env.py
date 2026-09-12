@@ -477,8 +477,12 @@ class CrutchCurriculumGym(GaitGym):
                 continue
             if not np.isfinite(offset):
                 continue
-            lag = max(0.0, -offset - t.crutch_forward_margin)
-            scores.append(gaussian(lag, t.crutch_forward_sigma))
+            # Deviation from where the crutch sits in the neutral pose, not
+            # from the pelvis itself. The crutches are welded to the forearms
+            # and rest ~5 cm ahead of the pelvis, so measuring against zero
+            # made this term a constant 1.0 that discriminated nothing.
+            shortfall = (t.crutch_offset_ref - offset) - t.crutch_forward_margin
+            scores.append(gaussian(max(0.0, shortfall), t.crutch_forward_sigma))
         return float(np.mean(scores)) if scores else 0.0
 
     def _term_velocity(self) -> float:
@@ -506,7 +510,13 @@ class CrutchCurriculumGym(GaitGym):
         return float(np.clip(self._travel_x() / max(cap, 1e-9), 0.0, 1.0))
 
     def _term_pelvis_lag(self) -> float:
-        """1.0 when the pelvis is not trailing behind both feet."""
+        """1.0 when the pelvis trails the feet no more than it does at rest.
+
+        The calcn bodies sit ~0.10 m ahead of the pelvis body COM in the
+        neutral pose, so measuring raw lag against zero scored 0.017 at rest and
+        left the term pinned regardless of what the policy did.
+        """
+        t = self.stage_spec.terms
         pelvis_x = self._pelvis_body_x()
         if pelvis_x is None:
             return 1.0
@@ -520,8 +530,8 @@ class CrutchCurriculumGym(GaitGym):
                 continue
         if not xs:
             return 1.0
-        lag = max(0.0, min(xs) - pelvis_x)
-        return gaussian(lag, self.stage_spec.terms.pelvis_lag_sigma)
+        excess_lag = (min(xs) - pelvis_x) - t.pelvis_foot_offset_ref
+        return gaussian(max(0.0, excess_lag), t.pelvis_lag_sigma)
 
     _TERM_FNS = {
         "height": _term_height,

@@ -105,7 +105,7 @@ Two related fixes went in alongside:
 - `crutch_forward` and `pelvis_lag` now both measure against the **pelvis body**
   position. v3 mixed `model.com_pos().x` with the `pelvis_tx` dof between these
   two terms, so they disagreed about where the body was. Travel-based terms
-  (`displacement`, `pelvis_forward`) still use `pelvis_tx`, which is zeroed at
+  (`displacement`) still use `pelvis_tx`, which is zeroed at
   reset — that distinction is deliberate and documented in `env.py`.
 
 ### 5. One class instead of four
@@ -119,6 +119,41 @@ only ever adds terms.
 Also resolved: v3's stage D config declared `init_load` twice (`0.5` then
 `0.4`); the second silently won. v4 uses `0.5` for all stages to match A–C.
 Override it if `0.4` was intended.
+
+### 6. Neutral-pose references, measured rather than assumed
+
+The first real run of stage D showed four of its nine terms pinned at constants.
+`scripts/calibrate.py` measured why:
+
+| measurement | consequence |
+|---|---|
+| feet sit **+0.101 m** ahead of the pelvis body COM at rest | `pelvis_lag` scored `exp(-(0.101/0.05)^2) = 0.017` at rest — pinned for geometric reasons, not behavioural ones |
+| crutches sit **+0.052 m** ahead, old margin was 0.050 | `crutch_forward` was a flat 1.0 and discriminated nothing |
+| pelvis drifts **backward** 0.075 m under zero torque | `pelvis_forward = clip(travel/cap, 0, 1)` was 0 for an entire episode |
+
+Both lag terms now measure deviation from `pelvis_foot_offset_ref` and
+`crutch_offset_ref` in `TermParams`, which hold the measured values. Re-run
+`calibrate.py` if the model or its init state changes. `pelvis_forward` is
+dropped from stage D: it had no gradient and duplicates `velocity`.
+
+Two stage-D tuning changes came from the same run. Its velocity target of
+0.03 m/s was unreachable from a standstill (velocity never exceeded 0.043 while
+stage C reached 0.993), so D now resets with C's forward push. And its crutch
+sigma of 0.15 capped the term at 0.22 against C's 0.97, so it now matches C at
+0.25 — unloading the crutch is still the goal, but it has to be reachable from
+where stage C leaves the policy.
+
+One thing the calibration did **not** support: `cane_target_load_fraction` is a
+design goal, not a quantity to match. There is no quasi-static standing pose to
+calibrate it against — with zero torque the model begins collapsing immediately
+(COM height 0.922 to 0.858 over 36 steps, fall at step 73), so any "natural"
+crutch load depends on the controller. The measured window median of 0.117
+happens to sit near stage B's 0.15, which is reassuring but not a calibration.
+
+Also worth watching: **18 of 36 steps carried zero crutch force.** Contact is
+intermittent rather than steady. The smoothstep gate zeroes those steps, so the
+term penalises chattering contact, which is probably right — but confirm it
+once a trained policy exists.
 
 ## Setup
 
@@ -162,6 +197,10 @@ python -m pytest tests -q
 # Environment smoke test. Needs sconegym + Hyfydy.
 python scripts/validate_env.py --stage A
 python scripts/validate_env.py --stage D --steps 400
+
+# Measure the neutral pose: crutch load as a fraction of body weight, and the
+# pelvis-to-foot / pelvis-to-crutch offsets the lag terms reference.
+python scripts/calibrate.py --stage B
 
 # One episode per stage plus reward plots. Needs sconegym + Hyfydy.
 # Uses half the logical cores; --cpu-fraction changes that.

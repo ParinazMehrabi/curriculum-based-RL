@@ -38,9 +38,9 @@ class TermParams:
     cane_gate_lo_n: float = 10.0
     cane_gate_hi_n: float = 30.0
 
-    # crutch placement
-    crutch_forward_margin: float = 0.05
-    crutch_forward_sigma: float = 0.10
+    # crutch placement, measured relative to the neutral standing pose
+    crutch_forward_margin: float = 0.02
+    crutch_forward_sigma: float = 0.05
 
     # locomotion
     velocity_sigma_fraction: float = 0.7
@@ -48,6 +48,19 @@ class TermParams:
     displacement_cap: float = 0.5
     displacement_sigma: float = 0.10
     pelvis_lag_sigma: float = 0.05
+
+    # Neutral-pose x offsets from the pelvis body COM, in metres, as measured by
+    # scripts/calibrate.py on Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar:
+    #
+    #   rearmost foot   pelvis + 0.101
+    #   rearmost crutch pelvis + 0.052
+    #
+    # pelvis_lag and crutch_forward measure deviation from these, not from zero.
+    # Measuring against zero made both terms constants: pelvis_lag scored 0.017
+    # at rest and crutch_forward a flat 1.0. Re-measure with calibrate.py if the
+    # model or its init state changes.
+    pelvis_foot_offset_ref: float = 0.101
+    crutch_offset_ref: float = 0.052
 
 
 @dataclass(frozen=True)
@@ -259,7 +272,12 @@ STAGE_D = StageSpec(
             "velocity": 0.25,
             "backward": 0.45,
             "displacement": 0.05,
-            "pelvis_forward": 0.15,
+            # pelvis_forward is deliberately absent. It is clip(travel/cap, 0, 1),
+            # which measured a flat 0.0 for an entire episode because the model
+            # drifts backward (-0.075 m) under zero torque. It was contributing a
+            # permanent multiplicative tax with no gradient, and it duplicates
+            # what velocity already rewards. Re-add with w_pelvis_forward if a
+            # trained policy actually travels forward.
             "pelvis_lag": 0.20,
         },
         fall_penalty=5.0,
@@ -270,13 +288,20 @@ STAGE_D = StageSpec(
         hip_knee_sigma=0.35,
         height_drop_sigma=0.18,
         cane_target_load_fraction=0.08,
-        cane_load_sigma_fraction=0.15,
-        crutch_forward_margin=0.05,
-        crutch_forward_sigma=0.10,
+        # Widened from 0.15 to match stage C. With the tighter value the 8%
+        # target scored at most 0.22 across a whole episode, against 0.97 in
+        # stage C -- unloading the crutch is the goal, but it has to be
+        # reachable from where stage C leaves the policy.
+        cane_load_sigma_fraction=0.25,
         velocity_sigma_fraction=0.7,
         displacement_cap=0.5,
     ),
     target_vel=0.03,
+    # Stage C resets with a small forward push and reached velocity=0.99; stage D
+    # inherited C's 0.03 m/s target but reset from a standstill, so velocity
+    # never exceeded 0.043. Match C so the target is reachable at step 1.
+    initial_forward_velocity=0.02,
+    initial_forward_velocity_std=0.01,
     # v3's stage D config declared init_load twice (0.5 then 0.4); the second
     # silently won. Resolved here to 0.5 to match stages A-C. Override in YAML
     # if 0.4 was in fact intended.
