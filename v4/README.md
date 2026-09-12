@@ -308,7 +308,25 @@ python scripts/progress.py --list       # show the runs it can see
 It matches candidate column names rather than assuming one spelling, and if it
 cannot recognise a reward column it prints the available ones instead of
 guessing. `--run <dir>` points it at a specific run; `SCONE_RESULTS` overrides
-where it searches.
+where it searches, and `--columns` dumps every column with its latest value.
+
+**deprl does not log this curriculum's reward terms.** It pre-allocates
+`rwd_metrics` from sconegym's canonical component names -- `constr`,
+`gaussian_vel`, `grf`, `number_muscles`, `self_contact`, `smooth` -- every one
+of which is 0.0 for a torque-actuated model with no muscles. `episode_score` and
+`episode_length` in the log are the environment's real values and can be
+trusted; the component breakdown cannot.
+
+For a term breakdown, read it off a checkpoint instead:
+
+```bash
+python scripts/eval_checkpoint.py <checkpoint> --stage B
+python scripts/eval_checkpoint.py <checkpoint> --stage B --episodes 20 --plot
+```
+
+That runs episodes with the trained policy and reports per-episode length and
+score, the mean of every reward term with its weight, and for crutch stages the
+measured contact force as a fraction of body weight against the target.
 
 `save_steps` stays at 100000, so the faster logging cadence does not multiply
 checkpoints. If the extra test episodes cost too much wall clock, raise

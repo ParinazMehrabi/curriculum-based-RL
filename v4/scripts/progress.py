@@ -43,9 +43,17 @@ REWARD_COLUMNS = (
     "train/return",
     "episode_score",
 )
-# The eight reward components in rwd_dict. deprl collects these into
-# rwd_metrics during the test episode and writes them as columns, but the prefix
-# varies by version, so they are matched as substrings.
+# The eight reward components in rwd_dict.
+#
+# Note: on this project deprl does NOT log these. It pre-allocates rwd_metrics
+# from sconegym's canonical reward names (constr, gaussian_vel, grf,
+# number_muscles, self_contact, smooth), all of which are 0.0 for a
+# torque-actuated model with no muscles, so the curriculum's own terms never
+# reach the CSV. episode_score and episode_length ARE the env's real values.
+#
+# Detection is kept in case a future deprl version logs them, but for a term
+# breakdown use scripts/eval_checkpoint.py, which reads env.term_values from a
+# checkpoint directly.
 TERM_NAMES = (
     "alive",
     "height",
@@ -160,6 +168,16 @@ def report(path: Path, tail: int, plot: bool, show: bool) -> int:
         )
 
     terms = find_term_columns(fields)
+    if not terms:
+        sconegym_cols = [f for f in fields if "rwd_metrics" in f]
+        if sconegym_cols:
+            print()
+            print("No curriculum reward terms in this log. deprl logged %d"
+                  % len({c.split("/")[2] for c in sconegym_cols if c.count("/") > 2}))
+            print("sconegym components instead (constr, grf, smooth, ...), which are")
+            print("0.0 for a muscle-free model. For a term breakdown run:")
+            print("  python scripts/eval_checkpoint.py <checkpoint> --stage %s"
+                  % ("B" if "stage_B" in str(path) else "A"))
     if terms:
         print()
         print("reward components (last %d epochs)" % len(shown))
