@@ -1,0 +1,24 @@
+# Python bytecode. v3 committed its __pycache__, which left orphaned .pyc files
+# for modules whose source had been deleted (a0_walk_gaitgym, stage1_stand_gaitgym,
+# stage2c_crutch_forward_gaitgym) and made a dead gym registration hard to spot.
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test and tooling caches
+.pytest_cache/
+.ipynb_checkpoints/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Generated rollout data (figures are kept; they are referenced from the README)
+v4/notebooks/results/
+
+# SCONE / Hyfydy run outputs
+*.sto
+*.par
