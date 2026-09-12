@@ -120,6 +120,36 @@ Also resolved: v3's stage D config declared `init_load` twice (`0.5` then
 `0.4`); the second silently won. v4 uses `0.5` for all stages to match A–C.
 Override it if `0.4` was intended.
 
+## Setup
+
+Python 3.9, from the repository root:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+pip install -e "E:\Pooria\SCONE crane\Sconegym\sconegym"
+```
+
+`sconepy` is not a pip package -- it ships inside the SCONE install (found at
+`C:\Program Files\SCONE\bin` on the training machine) and sconegym locates it
+automatically. Loading a `.hfd` model additionally needs an **active Hyfydy
+licence**; without one, `sconepy.load_model` raises before any v4 code runs.
+
+Do not upgrade `gym`. The working environment uses a pre-0.22 release with the
+old `registry.make(id, **kwargs)` API, and sconegym depends on it.
+
+### What runs without a licence
+
+Most of the project, which is deliberate -- the reward maths has no simulator
+dependency:
+
+| works without Hyfydy | needs Hyfydy |
+|---|---|
+| `pytest tests` (55 tests) | `scripts/validate_env.py` |
+| `scripts/reward_report.py` | `scripts/run_stages.py` |
+| notebook sections 1, 2, 7 | notebook sections 3-6 |
+
 ## Running it
 
 ```bash

@@ -1,0 +1,68 @@
+# Python 3.9 (matches the interpreter the training machine uses).
+#
+#   python -m venv .venv
+#   .\.venv\Scripts\Activate.ps1          # PowerShell
+#   pip install -r requirements.txt
+#
+# Two dependencies are NOT on PyPI and must be wired up separately -- see
+# "Not installable from PyPI" at the bottom of this file.
+
+# --- core ------------------------------------------------------------------
+# numpy must stay below 2.0: the gym/sconegym generation this project uses
+# predates the numpy 2 ABI change.
+numpy>=1.21,<2.0
+pyyaml>=5.4
+
+# --- RL stack --------------------------------------------------------------
+# gym is deliberately unpinned here because the working environment uses a
+# pre-0.22 release (the old `registry.make(id, **kwargs)` API). Upgrading gym
+# WILL break sconegym. Pin it to whatever your working machine reports -- see
+# the freeze recipe below -- rather than letting pip pick the newest.
+gym<0.22
+torch>=1.12
+tensorboard
+
+# deprl provides custom_agents, custom_mpo_torch, custom_replay_buffers and
+# custom_trainer, all referenced from the stage configs.
+deprl
+
+# --- plots and notebook ----------------------------------------------------
+matplotlib>=3.5,<4
+jupyterlab>=3.4
+ipykernel>=6.0
+nbformat>=5.0
+
+# --- tests and tooling -----------------------------------------------------
+pytest>=7.0
+# psutil is optional. Without it run_stages.py still limits BLAS/OpenMP thread
+# counts, but the process CPU affinity mask (the hard cap) is not applied.
+psutil>=5.9
+
+
+# ---------------------------------------------------------------------------
+# Not installable from PyPI
+# ---------------------------------------------------------------------------
+#
+# sconepy -- ships inside the SCONE installation, not pip. On the training
+#   machine it was found at "C:\Program Files\SCONE\bin". sconegym locates it
+#   automatically; if it does not, add that directory to PYTHONPATH.
+#   Requires an active Hyfydy licence to load a .hfd model.
+#
+# sconegym -- a local checkout on the training machine at
+#   "E:\Pooria\SCONE crane\Sconegym\sconegym". Install it into the venv in
+#   editable mode so v4 can import sconegym.gaitgym:
+#
+#     pip install -e "E:\Pooria\SCONE crane\Sconegym\sconegym"
+#
+# ---------------------------------------------------------------------------
+# Pinning from a known-good environment
+# ---------------------------------------------------------------------------
+#
+# This file uses loose bounds so it installs on a fresh machine. To capture the
+# exact versions that are known to work, run this in the environment that
+# currently trains successfully:
+#
+#     pip freeze > requirements-lock.txt
+#
+# and commit that alongside. Prefer the lock file when reproducing a run;
+# prefer this file when setting up somewhere new.
