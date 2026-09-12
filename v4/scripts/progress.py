@@ -43,6 +43,19 @@ REWARD_COLUMNS = (
     "train/return",
     "episode_score",
 )
+# The eight reward components in rwd_dict. deprl collects these into
+# rwd_metrics during the test episode and writes them as columns, but the prefix
+# varies by version, so they are matched as substrings.
+TERM_NAMES = (
+    "alive",
+    "height",
+    "posture",
+    "crutch",
+    "velocity",
+    "backward",
+    "displacement",
+)
+
 LENGTH_COLUMNS = (
     "train/episode_length/mean",
     "train/episode_length",
@@ -78,6 +91,23 @@ def pick(fields: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
         if c.lower() in lowered:
             return lowered[c.lower()]
     return None
+
+
+def find_term_columns(fields: Sequence[str]) -> Dict[str, str]:
+    """Map term name -> column, for whichever reward components got logged."""
+    found = {}
+    for term in TERM_NAMES:
+        matches = [
+            f
+            for f in fields
+            if term in f.lower() and "length" not in f.lower() and "score" not in f.lower()
+        ]
+        if not matches:
+            continue
+        # Prefer a test/ column over train/, and the shortest name otherwise.
+        matches.sort(key=lambda f: (0 if f.lower().startswith("test") else 1, len(f)))
+        found[term] = matches[0]
+    return found
 
 
 def _num(row: Dict[str, str], key: Optional[str]) -> Optional[float]:
@@ -129,6 +159,27 @@ def report(path: Path, tail: int, plot: bool, show: bool) -> int:
             )
         )
 
+    terms = find_term_columns(fields)
+    if terms:
+        print()
+        print("reward components (last %d epochs)" % len(shown))
+        names = [n for n in TERM_NAMES if n in terms]
+        print("%14s %s" % (step_col, " ".join("%9s" % n[:9] for n in names)))
+        print("-" * (15 + 10 * len(names)))
+        for row in shown:
+            s = _num(row, step_col)
+            cells = []
+            for n in names:
+                v = _num(row, terms[n])
+                cells.append("%9s" % ("%.4f" % v if v is not None else "-"))
+            print("%14s %s" % ("%d" % s if s is not None else "-", " ".join(cells)))
+        print()
+        print("means over the whole run:")
+        for n in names:
+            vs = [v for v in (_num(r, terms[n]) for r in rows) if v is not None]
+            if vs:
+                print("  %-14s %.4f   (last %.4f)  from %s" % (n, sum(vs) / len(vs), vs[-1], terms[n]))
+
     vals = [v for v in (_num(r, rwd_col) for r in rows) if v is not None]
     if vals:
         print()
@@ -176,6 +227,7 @@ def main() -> int:
     ap.add_argument("--follow", action="store_true", help="re-read until interrupted")
     ap.add_argument("--interval", type=float, default=30.0)
     ap.add_argument("--list", action="store_true", help="list logs and exit")
+    ap.add_argument("--columns", action="store_true", help="dump every column name and exit")
     ap.add_argument("--root", default=None, help="extra directory to search")
     args = ap.parse_args()
 
@@ -218,6 +270,19 @@ def main() -> int:
             print("Pass --run <dir>, or set SCONE_RESULTS to the results directory.")
             return 1
         log = logs[0]
+
+    if args.columns:
+        fields, rows = read_csv(log)
+        print("log:", log)
+        print("rows:", len(rows))
+        print()
+        last = rows[-1] if rows else {}
+        for f in fields:
+            print("  %-44s %s" % (f, last.get(f, "")))
+        print()
+        matched = find_term_columns(fields)
+        print("reward components recognised:", matched or "(none)")
+        return 0
 
     if not args.follow:
         return report(log, args.tail, args.plot, args.show)
