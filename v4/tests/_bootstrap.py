@@ -30,5 +30,13 @@ def load():
     return rewards, stages
 
 
+def load_trajectory():
+    """Return the trajectory module (loads the package skeleton first)."""
+    load()
+    import importlib
+
+    return importlib.import_module(PKG_NAME + ".trajectory")
+
+
 def env_source() -> str:
     return (PKG_DIR / "env.py").read_text(encoding="utf-8")

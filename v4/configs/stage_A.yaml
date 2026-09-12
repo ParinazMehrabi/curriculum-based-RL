@@ -1,4 +1,22 @@
-# Stage A -- static standing balance. Trains from scratch.
+# Stage A -- balance from reference-state initialisation. Trains from scratch.
+#
+# Episodes start at a uniformly random frame of
+# models/reference/gaitTracking_solution_raw.sto (an OpenSim Moco tracking
+# solution, 301 frames, 6.4 s, mean forward speed 0.142 m/s) rather than always
+# from the neutral pose, and the task is to hold whatever pose the model was
+# dropped into.
+#
+# rsi_velocity_scale is 0.0, so the pose arrives at rest. That is the balance
+# task. Raise it toward 1.0 to fade in the reference's mid-stride momentum,
+# which turns this into catch-and-recover:
+#
+#   header: >
+#     import deprl, gym, sconegym, sconegym_crutch_v4;
+#     sconegym_crutch_v4.register_variant('A', 'stage_a_v25-v1', rsi_velocity_scale=0.25)
+#
+# posture_reference is "init" because the reference leans 19-31 degrees forward
+# throughout; measured against an upright ideal the posture term would score
+# about 0.0004 on every frame.
 #
 # Stage configuration (reward weights, sigmas, reset distribution) lives in
 # sconegym_crutch_v4/stages.py, NOT in this file. v3 carried an env_args block

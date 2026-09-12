@@ -19,6 +19,8 @@ env/
 # Generated rollout data (figures are kept; they are referenced from the README)
 v4/notebooks/results/
 
-# SCONE / Hyfydy run outputs
+# SCONE / Hyfydy run outputs. Reference trajectories under models/reference/
+# are tracked deliberately -- they are inputs, not outputs.
 *.sto
 *.par
+!models/reference/*.sto

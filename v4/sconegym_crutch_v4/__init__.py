@@ -11,11 +11,23 @@ from typing import Dict
 from gym.envs.registration import register
 
 from .rewards import RewardSpec, gaussian, smoothstep
-from .stages import STAGE_ORDER, STAGES, StageSpec, TermParams, get_stage
+from .stages import (
+    INIT_FRAME,
+    NEUTRAL,
+    RSIConfig,
+    STAGE_ORDER,
+    STAGES,
+    StageSpec,
+    TermParams,
+    get_stage,
+)
+from .trajectory import Trajectory, load_sto, summarise
 
 __all__ = [
     "ENV_IDS",
+    "RSIConfig",
     "RewardSpec",
+    "Trajectory",
     "STAGES",
     "STAGE_ORDER",
     "StageSpec",
@@ -24,6 +36,7 @@ __all__ = [
     "env_id_for",
     "gaussian",
     "get_stage",
+    "load_sto",
     "make",
     "register_variant",
     "smoothstep",

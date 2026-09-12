@@ -26,7 +26,17 @@ import numpy as np
 from sconegym.gaitgym import GaitGym
 
 from .rewards import gaussian, smoothstep
-from .stages import StageSpec, get_stage
+from .stages import INIT_FRAME, StageSpec, get_stage
+from .trajectory import load_sto
+
+POSTURE_DOFS = (
+    "pelvis_tilt",
+    "lumbar_extension",
+    "hip_flexion_r",
+    "knee_angle_r",
+    "hip_flexion_l",
+    "knee_angle_l",
+)
 
 CANE_BODY_NAMES = ("Crutch_r", "Crutch_l")
 FOOT_BODY_NAMES = ("calcn_r", "calcn_l")
@@ -148,6 +158,23 @@ class CrutchCurriculumGym(GaitGym):
         self.rwd_dict: Optional[Dict[str, float]] = None
         self.term_values: Dict[str, float] = {}
         self._rng = np.random.RandomState(0)
+
+        # Reference-state initialisation. Loaded once, mapped into this model's
+        # dof order so a frame can be written straight to set_dof_positions.
+        self.trajectory = None
+        self.rsi_frame: Optional[int] = None
+        if spec.rsi is not None:
+            traj_path = Path(spec.rsi.trajectory)
+            if not traj_path.is_absolute():
+                traj_path = Path(__file__).resolve().parents[2] / traj_path
+            self.trajectory = load_sto(traj_path, self._dof_names)
+            print("[%s] RSI reference: %s" % (self.curriculum_stage, self.trajectory.describe()))
+
+        # Posture and height references. For the non-RSI stages these reproduce
+        # the previous behaviour exactly: trunk measured against upright, stance
+        # against the model's neutral pose.
+        self._posture_ref = self._neutral_posture_ref()
+        self._height_ref_y = self._base_pelvis_y
 
         self.stage_spec.reward.warn_if_unsafe(
             gamma=float(gamma_for_safety_check), label=self.curriculum_stage
@@ -319,8 +346,26 @@ class CrutchCurriculumGym(GaitGym):
 
         self.model.set_store_data(self.store_next)
 
-        q = self._base_q.copy()
-        dq = np.zeros_like(self._base_dq)
+        rsi = spec.rsi
+        if rsi is not None and self.trajectory is not None:
+            # Reference-state initialisation: drop into a random phase of the
+            # reference instead of always starting from the neutral pose.
+            self.rsi_frame, q, dq = self.trajectory.sample_frame(
+                self._rng, rsi.phase_range
+            )
+            dq = dq * rsi.velocity_scale
+            if rsi.posture_reference == INIT_FRAME:
+                self._posture_ref = self._frame_posture_ref(q)
+                self._height_ref_y = float(q[self._dof_index["pelvis_ty"]])
+            else:
+                self._posture_ref = self._neutral_posture_ref()
+                self._height_ref_y = self._base_pelvis_y
+        else:
+            self.rsi_frame = None
+            q = self._base_q.copy()
+            dq = np.zeros_like(self._base_dq)
+            self._posture_ref = self._neutral_posture_ref()
+            self._height_ref_y = self._base_pelvis_y
 
         for name in self.RANDOMIZED_Q:
             i = self._dof_index[name]
@@ -330,17 +375,21 @@ class CrutchCurriculumGym(GaitGym):
                 else spec.reset_position_std
             )
             q[i] += self._rng.normal(0.0, std)
-            dq[i] = self._rng.normal(0.0, spec.reset_velocity_std)
+            dq[i] += self._rng.normal(0.0, spec.reset_velocity_std)
 
         q[self._dof_index["pelvis_tx"]] = 0.0
         for name in self.LOCKED_DOFS:
             q[self._dof_index[name]] = 0.0
             dq[self._dof_index[name]] = 0.0
 
-        vx0 = self._rng.normal(
-            spec.initial_forward_velocity, spec.initial_forward_velocity_std
-        )
-        dq[self._dof_index["pelvis_tx"]] = max(0.0, float(vx0))
+        if rsi is None or rsi.velocity_scale <= 0.0:
+            vx0 = self._rng.normal(
+                spec.initial_forward_velocity, spec.initial_forward_velocity_std
+            )
+            dq[self._dof_index["pelvis_tx"]] = max(0.0, float(vx0))
+        else:
+            # The reference already supplies a forward speed; do not add to it.
+            dq[self._dof_index["pelvis_tx"]] *= 1.0
 
         self.model.set_dof_positions(q)
         self.model.set_dof_velocities(dq)
@@ -419,22 +468,34 @@ class CrutchCurriculumGym(GaitGym):
 
     def _term_height(self) -> float:
         y = self._dof()[self._dof_index["pelvis_ty"]]
-        drop = max(0.0, self._base_pelvis_y - float(y))
+        drop = max(0.0, self._height_ref_y - float(y))
         return gaussian(drop, self.stage_spec.terms.height_drop_sigma)
+
+    def _neutral_posture_ref(self) -> Dict[str, float]:
+        """The pre-RSI reference: upright trunk, neutral stance."""
+        ref = {"pelvis_tilt": 0.0, "lumbar_extension": 0.0}
+        for name in ("hip_flexion_r", "knee_angle_r", "hip_flexion_l", "knee_angle_l"):
+            ref[name] = float(self._base_q[self._dof_index[name]])
+        return ref
+
+    def _frame_posture_ref(self, q: np.ndarray) -> Dict[str, float]:
+        """Reference taken from the frame this episode started at."""
+        return {name: float(q[self._dof_index[name]]) for name in POSTURE_DOFS}
 
     def _term_posture(self) -> float:
         t = self.stage_spec.terms
         q = self._dof()
-        tilt = q[self._dof_index["pelvis_tilt"]]
-        lumbar = q[self._dof_index["lumbar_extension"]]
+        ref = self._posture_ref
+
+        tilt = q[self._dof_index["pelvis_tilt"]] - ref["pelvis_tilt"]
+        lumbar = q[self._dof_index["lumbar_extension"]] - ref["lumbar_extension"]
         trunk = float(
             np.exp(-((tilt / max(t.pelvis_tilt_sigma, 1e-9)) ** 2)
                    - ((lumbar / max(t.lumbar_sigma, 1e-9)) ** 2))
         )
         dev_sq = 0.0
         for name in ("hip_flexion_r", "knee_angle_r", "hip_flexion_l", "knee_angle_l"):
-            i = self._dof_index[name]
-            dev_sq += float(q[i] - self._base_q[i]) ** 2
+            dev_sq += float(q[self._dof_index[name]] - ref[name]) ** 2
         stance = float(np.exp(-dev_sq / max(t.hip_knee_sigma**2, 1e-12)))
         return float(np.clip(trunk * stance, 0.0, 1.0))
 

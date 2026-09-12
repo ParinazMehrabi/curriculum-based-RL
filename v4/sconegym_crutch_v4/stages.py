@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .rewards import GEOMETRIC, RewardSpec
 
@@ -63,6 +63,56 @@ class TermParams:
     crutch_offset_ref: float = 0.052
 
 
+NEUTRAL = "neutral"
+INIT_FRAME = "init"
+POSTURE_REFERENCES = (NEUTRAL, INIT_FRAME)
+
+
+@dataclass(frozen=True)
+class RSIConfig:
+    """Reference-state initialisation: reset to a random phase of a trajectory.
+
+    The DeepMimic trick. Resetting only to the neutral pose teaches balance from
+    one state; resetting to random phases of a gait cycle teaches it across the
+    whole cycle and gives a far wider basin of attraction.
+    """
+
+    # Path to the reference, relative to the repository root.
+    trajectory: str = "models/reference/gaitTracking_solution_raw.sto"
+
+    # Fraction of the reference's joint velocities to apply at reset.
+    #
+    # 0.0 drops the model into a walking *pose* at rest, which is the balance
+    # task. 1.0 hands it the full mid-stride momentum, which is a catch-and-
+    # recover task and much harder. This is the natural thing to fade in: start
+    # at 0.0, raise it as the policy stops falling.
+    velocity_scale: float = 0.0
+
+    # Restrict sampling to a sub-window of the reference, as fractions.
+    phase_range: Tuple[float, float] = (0.0, 1.0)
+
+    # "init"    -> posture and height are measured against the frame the
+    #              episode started from ("hold the pose you were dropped in")
+    # "neutral" -> measured against the model's neutral standing pose
+    #              ("recover to standing from wherever you start")
+    posture_reference: str = INIT_FRAME
+
+    # Keep the model at the origin rather than inheriting the reference's x.
+    zero_travel: bool = True
+
+    def __post_init__(self):
+        if not 0.0 <= self.velocity_scale <= 1.0:
+            raise ValueError("velocity_scale must lie in [0, 1]")
+        if self.posture_reference not in POSTURE_REFERENCES:
+            raise ValueError(
+                "posture_reference must be one of %r, got %r"
+                % (POSTURE_REFERENCES, self.posture_reference)
+            )
+        lo, hi = self.phase_range
+        if not 0.0 <= lo < hi <= 1.0:
+            raise ValueError("phase_range must satisfy 0 <= lo < hi <= 1")
+
+
 @dataclass(frozen=True)
 class StageSpec:
     """Everything that distinguishes one curriculum stage from another."""
@@ -70,6 +120,7 @@ class StageSpec:
     name: str
     reward: RewardSpec
     terms: TermParams = field(default_factory=TermParams)
+    rsi: Optional[RSIConfig] = None
 
     target_vel: float = 0.0
 
@@ -137,12 +188,15 @@ class StageSpec:
             "name",
             "reward",
             "terms",
+            "rsi",
         }
+        rsi_fields = {f.name for f in dataclasses.fields(RSIConfig)}
 
         weight_updates: Dict[str, float] = {}
         reward_updates: Dict[str, Any] = {}
         term_updates: Dict[str, Any] = {}
         stage_updates: Dict[str, Any] = {}
+        rsi_updates: Dict[str, Any] = {}
         unknown = []
 
         for key, value in overrides.items():
@@ -154,13 +208,15 @@ class StageSpec:
                 term_updates[key] = float(value)
             elif key in stage_fields:
                 stage_updates[key] = value
+            elif key.startswith("rsi_") and key[4:] in rsi_fields:
+                rsi_updates[key[4:]] = value
             else:
                 unknown.append(key)
 
         if unknown:
             raise KeyError(
                 "unknown override(s) for stage %r: %s\n"
-                "valid prefixes: w_<term>; valid keys: %s"
+                "valid prefixes: w_<term>, rsi_<field>; valid keys: %s"
                 % (
                     self.name,
                     ", ".join(sorted(unknown)),
@@ -178,7 +234,14 @@ class StageSpec:
 
         terms = dataclasses.replace(self.terms, **term_updates) if term_updates else self.terms
 
-        return dataclasses.replace(self, reward=reward, terms=terms, **stage_updates)
+        rsi = self.rsi
+        if rsi_updates:
+            base = rsi if rsi is not None else RSIConfig()
+            rsi = dataclasses.replace(base, **rsi_updates)
+
+        return dataclasses.replace(
+            self, reward=reward, terms=terms, rsi=rsi, **stage_updates
+        )
 
     def describe(self) -> str:
         w = self.reward.active_weights
@@ -199,12 +262,26 @@ def _spec(alive: float, weights: Mapping[str, float], **kw) -> RewardSpec:
 
 
 # ---------------------------------------------------------------------------
-# Stage A: static standing balance. No crutch reward, no locomotion.
+# Stage A: balance, initialised at random phases of the reference gait.
+#
+# Episodes start from a uniformly random frame of the Moco tracking solution
+# rather than always from the neutral pose, and the task is to hold whatever
+# pose the model was dropped into. velocity_scale=0.0 means the pose is handed
+# over at rest -- raise it to fade mid-stride momentum in.
+#
+# posture_reference="init" is essential here, not cosmetic: the reference leans
+# 19-31 degrees forward throughout (pelvis_tilt -0.55 to -0.34 rad), so posture
+# measured against an upright ideal would score about 0.0004 on every frame.
 # ---------------------------------------------------------------------------
 STAGE_A = StageSpec(
     name="A-stand",
     reward=_spec(alive=0.20, weights={"height": 0.25, "posture": 0.45}, fall_penalty=5.0),
     terms=TermParams(pelvis_tilt_sigma=0.12, lumbar_sigma=0.12),
+    rsi=RSIConfig(
+        trajectory="models/reference/gaitTracking_solution_raw.sto",
+        velocity_scale=0.0,
+        posture_reference=INIT_FRAME,
+    ),
 )
 
 # ---------------------------------------------------------------------------

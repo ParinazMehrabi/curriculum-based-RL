@@ -155,6 +155,46 @@ intermittent rather than steady. The smoothstep gate zeroes those steps, so the
 term penalises chattering contact, which is probably right — but confirm it
 once a trained policy exists.
 
+### 7. Reference-state initialisation on stage A
+
+Stage A no longer resets only to the neutral pose. Episodes start at a uniformly
+random frame of `models/reference/gaitTracking_solution_raw.sto` — an OpenSim
+Moco tracking solution, 301 frames over 6.4 s at a mean forward speed of
+0.142 m/s — and the task is to hold whatever pose the model was dropped into.
+This is the DeepMimic RSI trick: resetting to one state teaches balance from one
+state, while resetting across the cycle gives a far wider basin of attraction.
+
+Two things about the reference made this more than a reset change:
+
+- **It leans 19 to 31 degrees forward throughout** (`pelvis_tilt` runs
+  -0.55 to -0.34 rad and never approaches upright). Posture measured against an
+  upright ideal would score about 0.0004 on every frame, so `posture_reference`
+  is `"init"`: posture and height are measured against the frame the episode
+  started from. A test asserts this.
+- **Its ankle and mtp values stay within 0.01 rad**, so the locked-ankle model
+  is genuinely compatible with it. A test asserts that too — a future reference
+  with real ankle motion would be silently distorted by the reset, which zeroes
+  those dofs.
+
+`rsi_velocity_scale` defaults to **0.0**, so the pose arrives at rest. That is
+the balance task. Raising it toward 1.0 fades in the reference's mid-stride
+momentum and turns the task into catch-and-recover — which is the natural thing
+to anneal once the policy stops falling:
+
+```python
+scv4.register_variant("A", "stage_a_v25-v1", rsi_velocity_scale=0.25)
+```
+
+`rsi_phase_range` restricts sampling to a sub-window of the cycle, and
+`rsi_posture_reference="neutral"` switches the task to "recover to standing from
+wherever you start" instead.
+
+The loader (`trajectory.py`) matches Moco's `/jointset/<joint>/<coord>/value`
+and `/speed` columns, falls back to bare coordinate names and `<dof>_u`
+velocities, finite-differences velocities that are absent, and reports which
+convention it matched rather than guessing silently. A dof missing from the file
+raises and lists what the file does contain.
+
 ## Setup
 
 Python 3.9, from the repository root:
@@ -201,6 +241,9 @@ python scripts/validate_env.py --stage D --steps 400
 # Measure the neutral pose: crutch load as a fraction of body weight, and the
 # pelvis-to-foot / pelvis-to-crutch offsets the lag terms reference.
 python scripts/calibrate.py --stage B
+
+# Inspect the reference trajectory (numpy only, no simulator).
+python -c "import sys; sys.path.insert(0,'.'); from sconegym_crutch_v4.trajectory import load_sto, summarise; print(summarise(load_sto('../models/reference/gaitTracking_solution_raw.sto', ['pelvis_tilt','pelvis_tx','pelvis_ty','hip_flexion_r','knee_angle_r','hip_flexion_l','knee_angle_l','lumbar_extension'], require_all=False)))"
 
 # One episode per stage plus reward plots. Needs sconegym + Hyfydy.
 # Uses half the logical cores; --cpu-fraction changes that.

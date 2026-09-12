@@ -62,6 +62,14 @@ def main() -> int:
     print("crutch force ok  :", u._crutch_force_ok, u._crutch_probe_error or "")
     print("needs crutch     : force=%s pose=%s" % (spec.needs_crutch_force, spec.needs_crutch_pose))
     print("reward safety    :", spec.reward.termination_report()["verdict"])
+    if spec.rsi is not None:
+        indent = chr(10) + " " * 19
+        print("RSI              : %s" % u.trajectory.describe().replace(chr(10), indent))
+        print("  velocity_scale : %.2f" % spec.rsi.velocity_scale)
+        print("  phase_range    : %s" % (spec.rsi.phase_range,))
+        print("  posture ref    : %s" % spec.rsi.posture_reference)
+    else:
+        print("RSI              : disabled (resets to the neutral pose)")
     print()
 
     assert env.action_space.shape == (9,)
@@ -96,8 +104,16 @@ def main() -> int:
         dq = np.asarray(u.model.dof_velocity_array(), dtype=float)
         states.append(np.concatenate([q, dq]))
         print(
-            "reset %d: com vx=%+.5f pelvis y=%.5f tilt=%+.4f"
-            % (seed, u.model.com_vel().x, q[u._dof_index["pelvis_ty"]], q[u._dof_index["pelvis_tilt"]])
+            "reset %d: frame=%-5s com vx=%+.5f pelvis y=%.5f tilt=%+.4f hipR=%+.4f kneeR=%+.4f"
+            % (
+                seed,
+                u.rsi_frame if u.rsi_frame is not None else "-",
+                u.model.com_vel().x,
+                q[u._dof_index["pelvis_ty"]],
+                q[u._dof_index["pelvis_tilt"]],
+                q[u._dof_index["hip_flexion_r"]],
+                q[u._dof_index["knee_angle_r"]],
+            )
         )
     distinct = sum(1 for s in states[1:] if not np.allclose(states[0], s))
     assert distinct >= max(1, args.seeds - 2), "reset diversity unexpectedly low"
