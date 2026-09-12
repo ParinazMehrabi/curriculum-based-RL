@@ -162,11 +162,14 @@ class RewardSpec:
         # test_scone pre-allocates rwd_metrics and indexes it by these keys, so a
         # prefix here becomes a KeyError there rather than a missing metric.
         breakdown = dict(raw)
-        breakdown["shaping"] = float(shaping)
         breakdown["alive"] = float(self.alive)
         if self.legacy_penalties:
             breakdown["legacy_penalty"] = float(penalty)
         breakdown["total"] = float(total)
+        # Deliberately NOT in the breakdown: 'shaping'. Every other key here is
+        # one v3 also emitted, so deprl's test harness has a slot for it.
+        # shaping == (total - alive) / shaping_scale when no legacy penalties
+        # are configured, and the env exposes it as .shaping_value.
         return float(total), breakdown
 
     def min_step_reward(self) -> float:

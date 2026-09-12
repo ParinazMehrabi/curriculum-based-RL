@@ -69,10 +69,14 @@ tonic:
   parallel: 20
   sequential: 10
 
+  # epoch_steps is the logging cadence: tonic prints a metrics table and runs
+  # a test episode at the end of every epoch. 10000 gives reward roughly every
+  # 10k environment steps. Raise it to 25000 if the test episodes cost too much
+  # wall clock; save_steps stays at 100000 so checkpoints do not multiply.
   trainer: >
     deprl.custom_trainer.Trainer(
       steps=int(10000000),
-      epoch_steps=int(100000),
+      epoch_steps=int(10000),
       save_steps=int(100000)
     )
 

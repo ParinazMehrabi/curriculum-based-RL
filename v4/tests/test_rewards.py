@@ -171,7 +171,6 @@ def test_geometric_composition_rewards_satisfying_everything():
         {"height": 1.0, "posture": 1.0, "velocity": 1.0}
     )
     assert total == pytest.approx(1.0)
-    assert breakdown["shaping"] == pytest.approx(1.0)
 
 
 def test_zero_floor_annihilates_and_nonzero_floor_does_not():
@@ -189,7 +188,7 @@ def test_breakdown_carries_raw_terms():
     _, breakdown = geo.compose({"height": 0.5, "posture": 0.6, "velocity": 0.7})
     assert breakdown["height"] == pytest.approx(0.5)
     assert breakdown["velocity"] == pytest.approx(0.7)
-    assert "shaping" in breakdown and "total" in breakdown
+    assert "total" in breakdown and "alive" in breakdown
 
 
 def test_breakdown_keys_are_unprefixed():
@@ -208,8 +207,23 @@ def test_breakdown_keys_match_declared_reward_keys():
     """The env exposes REWARD_KEYS; it must agree with what compose emits."""
     geo, _ = _farm_specs(0.05)
     _, breakdown = geo.compose({"height": 1.0, "posture": 1.0, "velocity": 1.0})
-    declared = list(geo.required_terms) + ["shaping", "alive", "total"]
+    declared = list(geo.required_terms) + ["alive", "total"]
     assert set(declared) == set(breakdown)
+
+
+def test_shaping_is_not_on_the_wire():
+    """Only keys v3 also emitted may reach deprl's metric buffers.
+
+    'shaping' was the one novel key; it is recoverable from total and alive and
+    is exposed as env.shaping_value instead.
+    """
+    geo, _ = _farm_specs(0.05)
+    terms = {"height": 0.8, "posture": 0.7, "velocity": 0.6}
+    total, breakdown = geo.compose(terms)
+    assert "shaping" not in breakdown
+    recovered = (total - geo.alive) / geo.shaping_scale
+    assert 0.0 <= recovered <= 1.0
+    assert geo.alive + geo.shaping_scale * recovered == pytest.approx(total)
 
 
 def test_terms_are_clipped_into_unit_interval():

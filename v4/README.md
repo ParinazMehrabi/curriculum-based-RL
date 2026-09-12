@@ -55,6 +55,20 @@ impossible, not merely tuned away.
 the environment warns at construction if a spec is unsafe. `scripts/reward_report.py`
 prints it for all four stages.
 
+### A note on reward-dict keys
+
+deprl's `test_scone` pre-allocates its metric buffers and indexes them by the
+keys it finds in `info`, so the two must agree exactly. v3's keys were the bare
+term names plus `total`, and v3 declared a matching `REWARD_KEYS` attribute.
+
+An early v4 run reached the end of its first epoch and then died with
+`KeyError: 'term_height'` because the refactor had prefixed the keys and dropped
+`REWARD_KEYS`. Keys are now the bare term names plus `alive` and `total` — every
+one of which v3 also emitted — and the env derives `REWARD_KEYS` from the stage
+so the two cannot drift. `shaping` is deliberately kept off the wire, since it
+was the one novel key; it is recoverable as `(total - alive) / shaping_scale`
+and exposed as `env.shaping_value`.
+
 ### 3. Reward terms compose multiplicatively
 
 v3 summed the terms, so standing still in stage C collected
@@ -253,6 +267,28 @@ python scripts/run_stages.py --policy random --seed 1 --cpu-fraction 0.5
 # Or interactively:
 jupyter lab notebooks/run_stages.ipynb
 ```
+
+### Watching a training run
+
+The stage configs set `epoch_steps=10000`, so tonic prints a metrics table and
+runs a test episode roughly every 10k environment steps, and writes one CSV row
+per epoch into the run directory. `scripts/progress.py` reads that:
+
+```bash
+python scripts/progress.py              # latest run: table + trend
+python scripts/progress.py --plot       # + reward curve png
+python scripts/progress.py --follow     # keep printing as rows arrive
+python scripts/progress.py --list       # show the runs it can see
+```
+
+It matches candidate column names rather than assuming one spelling, and if it
+cannot recognise a reward column it prints the available ones instead of
+guessing. `--run <dir>` points it at a specific run; `SCONE_RESULTS` overrides
+where it searches.
+
+`save_steps` stays at 100000, so the faster logging cadence does not multiply
+checkpoints. If the extra test episodes cost too much wall clock, raise
+`epoch_steps` to 25000.
 
 Section 7 of the notebook (`plot_gating`) needs neither gym nor a Hyfydy
 licence, so the reward-gating analysis runs on any machine with numpy and

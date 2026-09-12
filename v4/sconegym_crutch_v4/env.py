@@ -159,6 +159,7 @@ class CrutchCurriculumGym(GaitGym):
 
         self.rwd_dict: Optional[Dict[str, float]] = None
         self.term_values: Dict[str, float] = {}
+        self.shaping_value: float = 0.0
         self._rng = np.random.RandomState(0)
 
         # Reference-state initialisation. Loaded once, mapped into this model's
@@ -632,6 +633,10 @@ class CrutchCurriculumGym(GaitGym):
         self.term_values = self.compute_terms()
         total, breakdown = self.stage_spec.reward.compose(self.term_values)
         self.rwd_dict = breakdown
+        spec = self.stage_spec.reward
+        self.shaping_value = (
+            (total - spec.alive) / spec.shaping_scale if spec.shaping_scale > 0 else 0.0
+        )
         return float(total)
 
     @property
@@ -644,7 +649,7 @@ class CrutchCurriculumGym(GaitGym):
         derived from the stage so the two cannot drift apart.
         """
         spec = self.stage_spec.reward
-        keys = list(spec.required_terms) + ["shaping", "alive"]
+        keys = list(spec.required_terms) + ["alive"]
         if spec.legacy_penalties:
             keys.append("legacy_penalty")
         keys.append("total")
