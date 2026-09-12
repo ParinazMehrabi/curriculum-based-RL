@@ -55,6 +55,30 @@ impossible, not merely tuned away.
 the environment warns at construction if a spec is unsafe. `scripts/reward_report.py`
 prints it for all four stages.
 
+### A note on `rwd_dict`
+
+Two stage A runs died at the end of their first epoch with `KeyError` inside
+deprl's `test_scone`. The cause, from deprl's own source:
+
+```python
+for k, v in environment.rwd_dict.items():
+    rwd_metrics[k].append(float(v))
+```
+
+deprl reads `environment.rwd_dict` directly and pre-allocates `rwd_metrics` from
+it **before** the test episode. v3 set `rwd_dict = None` only in `__init__` and
+never cleared it on reset, so by the time deprl looked it was always populated.
+v4's `reset()` nulled it, deprl pre-allocated an empty buffer, and the loop then
+raised on the first key of the now-populated dict — which is exactly what the two
+errors named (`term_height`, then `height` after unprefixing).
+
+So `rwd_dict` is now a dict with a fixed key set from construction onward.
+`reset()` zeroes its values and never rebinds or clears it. The full compose()
+output lives separately on `env.reward_breakdown`, and raw term values on
+`env.term_values`. Three tests pin this: that `rwd_dict` is never None, that
+`reset` only zeroes values, and that `get_rwd_dict` does not depend on a step
+having happened.
+
 ### A note on reward-dict keys
 
 deprl's `test_scone` pre-allocates its metric buffers and indexes them by the

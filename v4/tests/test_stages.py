@@ -313,11 +313,49 @@ def test_info_keys_are_pinned_to_the_v3_set():
     ]
 
 
-def test_step_builds_info_from_the_pinned_set():
-    """step() must go through _legacy_info, not splat rwd_dict directly."""
+def test_rwd_dict_is_never_none():
+    """The regression test for the failure that killed two runs.
+
+    deprl pre-allocates its metric buffers from environment.rwd_dict before the
+    test episode, then indexes them by the keys found there afterwards. If reset
+    nulls or empties rwd_dict, the buffer is empty and the loop raises KeyError
+    on the first key. v3 never cleared it on reset; v4 did, and paid for it.
+    """
     src = env_source()
-    assert "info.update(self._legacy_info())" in src
-    assert "info.update(self.rwd_dict" not in src
+    assert "self.rwd_dict: Dict[str, float] = {k: 0.0 for k in V3_INFO_KEYS}" in src
+    assert "self.rwd_dict = None" not in src
+    assert "self.rwd_dict: Optional[Dict[str, float]] = None" not in src
+
+
+def test_reset_zeroes_values_but_keeps_keys():
+    """reset must not rebind or clear rwd_dict, only zero its values."""
+    src = env_source()
+    tree = ast.parse(src)
+    reset = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "reset"
+    )
+    body = ast.get_source_segment(src, reset)
+    assert "for key in self.rwd_dict:" in body
+    assert "self.rwd_dict = " not in body
+    assert "self.rwd_dict.clear()" not in body
+
+
+def test_get_rwd_dict_never_returns_empty():
+    """It must not depend on a step having happened first."""
+    src = env_source()
+    tree = ast.parse(src)
+    fn = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "get_rwd_dict"
+    )
+    body = ast.get_source_segment(src, fn)
+    assert "if self.rwd_dict is None" not in body
+
+
+def test_step_builds_info_from_the_pinned_dict():
+    src = env_source()
+    assert "info.update(self.rwd_dict)" in src
 
 
 def test_v4_only_terms_stay_out_of_info():

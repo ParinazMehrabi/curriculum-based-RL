@@ -181,7 +181,20 @@ class CrutchCurriculumGym(GaitGym):
         self._crutch_probe_error: Optional[str] = None
         self._probe_crutch_api(strict=bool(strict_crutch))
 
-        self.rwd_dict: Optional[Dict[str, float]] = None
+        # rwd_dict must always be a dict with the same keys, from construction
+        # onward. deprl's test_scone pre-allocates its metric buffers from
+        # environment.rwd_dict BEFORE the test episode and then indexes them by
+        # the keys it finds there afterwards:
+        #
+        #     for k, v in environment.rwd_dict.items():
+        #         rwd_metrics[k].append(float(v))
+        #
+        # v3 only set rwd_dict to None in __init__ and never cleared it on
+        # reset, so by the time deprl looked it was always populated. v4's reset
+        # nulled it, deprl pre-allocated an empty buffer, and the loop then
+        # raised KeyError on the first key of the populated dict.
+        self.rwd_dict: Dict[str, float] = {k: 0.0 for k in V3_INFO_KEYS}
+        self.reward_breakdown: Dict[str, float] = {}
         self.term_values: Dict[str, float] = {}
         self.shaping_value: float = 0.0
         self._rng = np.random.RandomState(0)
@@ -373,7 +386,9 @@ class CrutchCurriculumGym(GaitGym):
         self.fall_time = -1.0
         self.prev_action[:] = 0.0
         self.current_action[:] = 0.0
-        self.rwd_dict = None
+        # Zero the values, never the keys. See the note in __init__.
+        for key in self.rwd_dict:
+            self.rwd_dict[key] = 0.0
         self.term_values = {}
 
         self.model.set_store_data(self.store_next)
@@ -463,7 +478,7 @@ class CrutchCurriculumGym(GaitGym):
         self.total_reward += reward
 
         info = {"curriculum_stage": self.curriculum_stage}
-        info.update(self._legacy_info())
+        info.update(self.rwd_dict)
 
         if done:
             if self.store_next:
@@ -656,23 +671,14 @@ class CrutchCurriculumGym(GaitGym):
         self.steps += 1
         self.term_values = self.compute_terms()
         total, breakdown = self.stage_spec.reward.compose(self.term_values)
-        self.rwd_dict = breakdown
+        self.reward_breakdown = breakdown
+        for key in self.rwd_dict:
+            self.rwd_dict[key] = float(breakdown.get(key, 0.0))
         spec = self.stage_spec.reward
         self.shaping_value = (
             (total - spec.alive) / spec.shaping_scale if spec.shaping_scale > 0 else 0.0
         )
         return float(total)
-
-    def _legacy_info(self) -> Dict[str, float]:
-        """The eight v3 keys, zero-filled for terms this stage does not weight.
-
-        See V3_INFO_KEYS for why the set is fixed rather than stage-dependent.
-        """
-        out = {k: 0.0 for k in V3_INFO_KEYS}
-        for key, value in (self.rwd_dict or {}).items():
-            if key in out:
-                out[key] = float(value)
-        return out
 
     @property
     def REWARD_KEYS(self) -> tuple:
@@ -686,9 +692,7 @@ class CrutchCurriculumGym(GaitGym):
         return V3_INFO_KEYS
 
     def get_rwd_dict(self) -> Dict[str, float]:
-        if self.rwd_dict is None:
-            self._get_rew()
-        return dict(self.rwd_dict or {})
+        return dict(self.rwd_dict)
 
     # -- termination ------------------------------------------------------
 
