@@ -199,9 +199,31 @@ def test_stage_b_matches_stage_a_rsi():
     assert b.phase_range == a.phase_range
 
 
-def test_locomotion_stages_do_not_use_rsi_yet():
-    for key in ("C", "D"):
-        assert stages.STAGES[key].rsi is None, key
+def test_stage_c_matches_the_shared_rsi():
+    a, c = stages.STAGES["A"].rsi, stages.STAGES["C"].rsi
+    assert c is not None
+    assert c.trajectory == a.trajectory
+    assert c.velocity_scale == a.velocity_scale
+    assert c.posture_reference == a.posture_reference
+
+
+def test_stage_d_does_not_use_rsi_yet():
+    assert stages.STAGES["D"].rsi is None
+
+
+def test_stage_c_loosens_hip_knee_for_locomotion():
+    """posture must not fight velocity in the first stage that has to move.
+
+    A stride moves hip flexion by roughly 0.6 rad. At the standing sigma of
+    0.35 that scores about 0.05, so the 0.45-weighted posture term would punish
+    every step the velocity term rewards.
+    """
+    assert stages.STAGES["C"].terms.hip_knee_sigma > stages.STAGES["B"].terms.hip_knee_sigma
+    stride = 0.6
+    tight = rewards.gaussian(stride, stages.STAGES["B"].terms.hip_knee_sigma)
+    loose = rewards.gaussian(stride, stages.STAGES["C"].terms.hip_knee_sigma)
+    assert tight < 0.1
+    assert loose > 0.3
 
 
 def test_rsi_validates_its_fields():

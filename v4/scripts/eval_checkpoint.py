@@ -100,6 +100,106 @@ def load_policy(deprl, run_dir: Path, env, checkpoint):
     return deprl.load(str(run_dir) + os.sep, **kwargs)
 
 
+def run_episodes(policy, env, episodes, seed, limit, needs_force):
+    """Return (lengths, scores, term means per episode, crutch forces)."""
+    u = env.unwrapped
+    lengths, scores, terms, forces = [], [], defaultdict(list), []
+    for ep in range(episodes):
+        obs = env.reset(seed=seed + ep)
+        ep_terms = defaultdict(list)
+        score, steps = 0.0, 0
+        for _ in range(limit):
+            obs, reward, done, _ = env.step(policy(obs))
+            score += float(reward)
+            steps += 1
+            for name, value in u.term_values.items():
+                ep_terms[name].append(float(value))
+            if needs_force:
+                forces.append(u.crutch_contact_force())
+            if done:
+                break
+        lengths.append(steps)
+        scores.append(score)
+        for name, vals in ep_terms.items():
+            terms[name].append(float(np.mean(vals)))
+    return lengths, scores, terms, forces
+
+
+def sweep_phase(deprl, run_dir: Path, args) -> int:
+    """Evaluate each window of the reference cycle separately.
+
+    A posture term that is low everywhere is a policy problem. One that is high
+    in some windows and near zero in others means those frames are not
+    statically holdable at velocity_scale 0, and the task is asking for
+    something impossible rather than the policy failing.
+    """
+    n = int(args.sweep_phase)
+    edges = np.linspace(0.0, 1.0, n + 1)
+    print("=" * 78)
+    print("phase sweep: %d windows, %d episodes each, stage %s"
+          % (n, args.episodes, args.stage))
+    print("run dir:", run_dir)
+    print("=" * 78)
+    print("%-14s %8s %9s %9s %9s %9s"
+          % ("window", "length", "score", "posture", "crutch", "height"))
+    print("-" * 64)
+
+    rows = []
+    for i in range(n):
+        lo, hi = float(edges[i]), float(edges[i + 1])
+        env = gym.make(
+            scv4.env_id_for(args.stage),
+            strict_crutch=not args.no_strict_crutch,
+            rsi_phase_range=(lo, hi),
+        )
+        spec = env.unwrapped.stage_spec
+        limit = int(args.max_steps or spec.episode_steps)
+        policy = load_policy(deprl, run_dir, env, args.checkpoint)
+        lengths, scores, terms, _ = run_episodes(
+            policy, env, args.episodes, args.seed, limit, spec.needs_crutch_force
+        )
+        env.close()
+        row = dict(
+            lo=lo,
+            hi=hi,
+            length=float(np.mean(lengths)),
+            score=float(np.mean(scores)),
+            **{k: float(np.mean(v)) for k, v in terms.items()},
+        )
+        rows.append(row)
+        print(
+            "%.2f-%.2f      %8.1f %9.2f %9.4f %9.4f %9.4f"
+            % (lo, hi, row["length"], row["score"],
+               row.get("posture", float("nan")),
+               row.get("crutch", float("nan")),
+               row.get("height", float("nan")))
+        )
+
+    postures = [r.get("posture") for r in rows if r.get("posture") is not None]
+    if postures:
+        best = max(range(len(rows)), key=lambda i: rows[i].get("posture", -1))
+        worst = min(range(len(rows)), key=lambda i: rows[i].get("posture", 2))
+        print()
+        print("posture: best window %.2f-%.2f at %.4f, worst %.2f-%.2f at %.4f"
+              % (rows[best]["lo"], rows[best]["hi"], rows[best]["posture"],
+                 rows[worst]["lo"], rows[worst]["hi"], rows[worst]["posture"]))
+        spread = max(postures) - min(postures)
+        print("spread across windows: %.4f" % spread)
+        if spread > 0.25:
+            print()
+            print("Large spread: some windows are far more holdable than others.")
+            print("That points at the task, not the policy. Restrict sampling with")
+            print("  rsi_phase_range=(%.2f, %.2f)" % (rows[best]["lo"], rows[best]["hi"]))
+            print("or switch rsi_posture_reference to 'neutral' so the target is")
+            print("always reachable.")
+        else:
+            print()
+            print("Small spread: posture is uniformly low, which is a policy or")
+            print("sigma problem rather than unholdable frames. Consider widening")
+            print("pelvis_tilt_sigma and lumbar_sigma from 0.12.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -119,17 +219,38 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=1000)
     ap.add_argument("--max-steps", type=int, default=None)
     ap.add_argument("--no-strict-crutch", action="store_true")
+    ap.add_argument(
+        "--phase-range",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("LO", "HI"),
+        help="restrict RSI sampling to this fraction of the reference cycle",
+    )
+    ap.add_argument(
+        "--sweep-phase",
+        type=int,
+        default=0,
+        metavar="N",
+        help="split the cycle into N windows and report each separately. Tests "
+        "whether a low posture term means the policy is weak or the frames are "
+        "not statically holdable.",
+    )
     ap.add_argument("--plot", action="store_true")
     ap.add_argument("--store", action="store_true", help="write SCONE result files")
     args = ap.parse_args()
 
-    import deprl
+    import deprl  # noqa: F401  (imported here so --help works without it)
 
     run_dir = resolve_run_dir(Path(args.run))
 
-    env = gym.make(
-        scv4.env_id_for(args.stage), strict_crutch=not args.no_strict_crutch
-    )
+    if args.sweep_phase > 0:
+        return sweep_phase(deprl, run_dir, args)
+
+    make_kwargs = {"strict_crutch": not args.no_strict_crutch}
+    if args.phase_range is not None:
+        make_kwargs["rsi_phase_range"] = tuple(args.phase_range)
+    env = gym.make(scv4.env_id_for(args.stage), **make_kwargs)
     u = env.unwrapped
     spec = u.stage_spec
     limit = int(args.max_steps or spec.episode_steps)

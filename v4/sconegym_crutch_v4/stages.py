@@ -336,12 +336,31 @@ STAGE_C = StageSpec(
         cane_load_sigma_fraction=0.25,
         velocity_sigma_fraction=0.7,
         displacement_cap=0.5,
+        # Widened from 0.35 because this is the first stage that has to MOVE.
+        # posture measures hip and knee deviation from the reference frame, and
+        # a stride changes hip flexion by roughly 0.6 rad. At 0.35 the posture
+        # term (weight 0.45) would score about exp(-(0.6/0.35)^2) = 0.05 for any
+        # real step, directly opposing the velocity term it shares the reward
+        # with. At 0.60 a full stride costs a factor of about 0.37 instead.
+        # Revert to 0.35 if stage C walks but the legs stop tracking the
+        # reference at all.
+        hip_knee_sigma=0.60,
     ),
     target_vel=0.03,
     initial_forward_velocity=0.02,
     initial_forward_velocity_std=0.01,
     reset_position_std=0.01,
     reset_velocity_std=0.01,
+    # Same RSI as A and B, so the initial-state distribution and posture
+    # reference carry across the transfer and velocity, backward and
+    # displacement are the only new axes. Stage B's policy is tuned for the
+    # reference's forward lean; resetting to the upright neutral pose here and
+    # scoring posture against upright would have discarded most of it.
+    rsi=RSIConfig(
+        trajectory="models/reference/gaitTracking_solution_raw.sto",
+        velocity_scale=0.0,
+        posture_reference=INIT_FRAME,
+    ),
 )
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,20 @@
 # Stage C -- tiny forward locomotion with the crutch. Warm-starts from stage B.
 #
+# Same RSI as stages A and B (same trajectory, velocity_scale 0.0,
+# posture_reference "init"), so the initial-state distribution and posture
+# reference carry across the transfer and velocity / backward / displacement are
+# the only new axes.
+#
+# hip_knee_sigma is widened to 0.60 for this stage. posture measures hip and
+# knee deviation from the reference frame, and a stride moves hip flexion by
+# roughly 0.6 rad. At the standing value of 0.35 the 0.45-weighted posture term
+# would score about 0.05 for any real step, opposing the velocity term it shares
+# the reward with. Revert to 0.35 if C walks but stops tracking the reference
+# legs at all.
+#
+# New this stage: velocity toward 0.03 m/s (sigma fraction 0.7), a backward gate
+# and a displacement cap at 0.5 m.
+#
 # Stage configuration (reward weights, sigmas, reset distribution) lives in
 # sconegym_crutch_v4/stages.py, NOT in this file. v3 carried an env_args block
 # here, but nothing in the package ever read it and it was never confirmed that
@@ -51,9 +66,21 @@ tonic:
   #  2. The reward function changes at this boundary, so the critic arrives
   #     mis-calibrated. Expect a dip. A critic warm-up or return
   #     normalisation is the next thing worth adding here.
+  # Stage B run 260913.094155. Its step_2400000 policy reached crutch 0.7432
+  # (up from 0.4747 zero-shot), height 0.7921, posture 0.2348, with zero falls
+  # over 10 episodes at full 1000-step length.
+  #
+  # UPDATE THIS to stage B's latest checkpoint before launching -- B was still
+  # training when this was written. Check what exists with:
+  #   python scripts/eval_checkpoint.py <stage-B-run-dir> --stage B
+  # which prints the checkpoint range.
+  #
+  # Note the path has no .pt extension, matching what agent.load accepts; the
+  # stage A -> B transfer was verified working with this form (stage B's
+  # step_100000 evaluated byte-identically to stage A's step_5700000).
   before_training: >
     agent.load(
-      r'REPLACE_ME/checkpoints/stage_B/step_XXXXXXX',
+      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_B_stand_crutch\260913.094155.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_2400000',
       only_checkpoint=True
     )
   after_training: ''
