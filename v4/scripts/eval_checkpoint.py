@@ -118,6 +118,40 @@ def list_checkpoints(run_dir: Path):
     return sorted(folder.glob("step_*"), key=step_number)
 
 
+def resolve_checkpoint(run_dir: Path, requested):
+    """Validate a checkpoint request against what is actually on disk.
+
+    deprl's load_checkpoint prints "Checkpoint X not found" and returns None
+    for an unknown id, then crashes on the None downstream. Checking here gives
+    a usable message instead.
+    """
+    available = list_checkpoints(run_dir)
+    if not available:
+        raise FileNotFoundError("no checkpoints under %s" % (run_dir / "checkpoints"))
+    if requested is None or str(requested).lower() == "last":
+        return None  # let the run config pick, which is 'last'
+    if str(requested).lower() == "first":
+        return str(step_number(available[0]))
+
+    want = str(requested).strip()
+    digits = "".join(ch for ch in want if ch.isdigit())
+    steps = [step_number(c) for c in available]
+    if digits and int(digits) in steps:
+        return str(int(digits))
+
+    raise SystemExit(
+        "checkpoint %r does not exist in this run.%s"
+        "available: %s%s"
+        "pass one of those numbers, or 'first' / 'last', or omit --checkpoint."
+        % (
+            requested,
+            chr(10),
+            ", ".join(str(s) for s in steps),
+            chr(10),
+        )
+    )
+
+
 def load_policy(deprl, run_dir: Path, env, checkpoint):
     """deprl.load with the run directory, selecting a checkpoint if supported.
 
@@ -127,18 +161,27 @@ def load_policy(deprl, run_dir: Path, env, checkpoint):
     """
     import inspect
 
+    resolved = resolve_checkpoint(run_dir, checkpoint)
+
     kwargs = {"environment": env}
-    if checkpoint is not None:
+    if resolved is not None:
         params = inspect.signature(deprl.load).parameters
         if "checkpoint" in params:
-            kwargs["checkpoint"] = checkpoint
+            kwargs["checkpoint"] = resolved
         else:
             print(
                 "note: this deprl.load has no 'checkpoint' parameter "
                 "(accepts %s), so the run config's choice is used instead"
                 % ", ".join(params)
             )
-    return deprl.load(str(run_dir) + os.sep, **kwargs)
+
+    policy = deprl.load(str(run_dir) + os.sep, **kwargs)
+    if policy is None:
+        raise SystemExit(
+            "deprl.load returned None for %s. The checkpoint exists but could "
+            "not be loaded; check the lines deprl printed above." % run_dir
+        )
+    return policy
 
 
 def run_episodes(policy, env, episodes, seed, limit, needs_force):
