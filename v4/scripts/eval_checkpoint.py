@@ -25,6 +25,8 @@ is also why v3's evaluate_A0_checkpoint.py could never have worked.
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -58,8 +60,30 @@ def resolve_run_dir(path: Path) -> Path:
     )
 
 
+def step_number(path: Path) -> int:
+    """The integer in step_NNNNNN, for numeric sorting.
+
+    Lexicographic sorting puts step_900000 after step_10000000, which made the
+    listing report the wrong latest checkpoint.
+    """
+    match = re.search(r"step_(\d+)", path.name)
+    return int(match.group(1)) if match else -1
+
+
+def list_checkpoints(run_dir: Path):
+    folder = run_dir / "checkpoints"
+    if not folder.is_dir():
+        return []
+    return sorted(folder.glob("step_*"), key=step_number)
+
+
 def load_policy(deprl, run_dir: Path, env, checkpoint):
-    """deprl.load with the run directory, selecting a checkpoint if supported."""
+    """deprl.load with the run directory, selecting a checkpoint if supported.
+
+    The trailing separator is load-bearing: deprl's load_checkpoint builds the
+    checkpoint folder by string concatenation rather than os.path.join, so
+    without it the path becomes "<run>checkpoints" and the listdir fails.
+    """
     import inspect
 
     kwargs = {"environment": env}
@@ -73,7 +97,7 @@ def load_policy(deprl, run_dir: Path, env, checkpoint):
                 "(accepts %s), so the run config's choice is used instead"
                 % ", ".join(params)
             )
-    return deprl.load(str(run_dir), **kwargs)
+    return deprl.load(str(run_dir) + os.sep, **kwargs)
 
 
 def main() -> int:
@@ -112,9 +136,14 @@ def main() -> int:
 
     print("=" * 78)
     print("run dir    :", run_dir)
-    available = sorted((run_dir / "checkpoints").glob("step_*")) if (run_dir / "checkpoints").is_dir() else []
+    available = list_checkpoints(run_dir)
     if available:
-        print("checkpoints: %d found, latest %s" % (len(available), available[-1].name))
+        print(
+            "checkpoints: %d found, %s .. %s (loading the last unless --checkpoint)"
+            % (len(available), available[0].name, available[-1].name)
+        )
+    else:
+        print("checkpoints: none found under", run_dir / "checkpoints")
     print("stage      :", spec.describe())
     print("episodes   :", args.episodes)
     if spec.rsi is not None:
