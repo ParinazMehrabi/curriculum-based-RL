@@ -320,9 +320,14 @@ trusted; the component breakdown cannot.
 For a term breakdown, read it off a checkpoint instead:
 
 ```bash
-python scripts/eval_checkpoint.py <checkpoint> --stage B
-python scripts/eval_checkpoint.py <checkpoint> --stage B --episodes 20 --plot
+python scripts/eval_checkpoint.py <run-dir> --stage B
+python scripts/eval_checkpoint.py <run-dir> --stage B --episodes 20 --plot
 ```
+
+`<run-dir>` is the directory holding `config.yaml`, not a checkpoint file --
+`deprl.load` reads that config to rebuild the agent. A path to a checkpoint
+inside the run also works, since the run directory is found by walking up to the
+nearest `config.yaml`.
 
 That runs episodes with the trained policy and reports per-episode length and
 score, the mean of every reward term with its weight, and for crutch stages the

@@ -10,11 +10,17 @@ breakdown is not.
 
 So: load a checkpoint, run episodes, read env.term_values directly.
 
-    python scripts/eval_checkpoint.py <checkpoint> --stage B
-    python scripts/eval_checkpoint.py <checkpoint> --stage B --episodes 20 --plot
+    python scripts/eval_checkpoint.py <run-dir> --stage B
+    python scripts/eval_checkpoint.py <run-dir> --stage B --episodes 20 --plot
 
-<checkpoint> is a deprl checkpoint path such as
-  .../crutch_v4_stage_A_stand/<run>/checkpoints/step_5600000
+<run-dir> is the directory holding config.yaml, e.g.
+  .../crutch_v4_stage_A_stand/260912.135956.Rajagopal2015_crutch_2D_..._lumbar
+
+A path to a checkpoint inside that run works too; the run directory is found by
+walking up to the nearest config.yaml. deprl.load needs the run directory
+because it reads config.yaml to rebuild the agent -- handing it a checkpoint
+path fails with "'NoneType' object is not subscriptable" from load_utils, which
+is also why v3's evaluate_A0_checkpoint.py could never have worked.
 """
 from __future__ import annotations
 
@@ -35,9 +41,55 @@ import sconegym  # noqa: F401
 import sconegym_crutch_v4 as scv4
 
 
+def resolve_run_dir(path: Path) -> Path:
+    """Find the directory holding config.yaml, from any path inside the run.
+
+    deprl.load reads config.yaml to rebuild the agent, so it needs the run
+    directory rather than a checkpoint file. Passing the checkpoint path gives
+    'NoneType' object is not subscriptable from load_utils.
+    """
+    path = path.resolve()
+    for candidate in [path] + list(path.parents):
+        if (candidate / "config.yaml").is_file():
+            return candidate
+    raise FileNotFoundError(
+        "no config.yaml found at %s or in any parent directory. Pass the run "
+        "directory, e.g. .../crutch_v4_stage_A_stand/<timestamp>.<model>/" % path
+    )
+
+
+def load_policy(deprl, run_dir: Path, env, checkpoint):
+    """deprl.load with the run directory, selecting a checkpoint if supported."""
+    import inspect
+
+    kwargs = {"environment": env}
+    if checkpoint is not None:
+        params = inspect.signature(deprl.load).parameters
+        if "checkpoint" in params:
+            kwargs["checkpoint"] = checkpoint
+        else:
+            print(
+                "note: this deprl.load has no 'checkpoint' parameter "
+                "(accepts %s), so the run config's choice is used instead"
+                % ", ".join(params)
+            )
+    return deprl.load(str(run_dir), **kwargs)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("checkpoint", help="path to step_XXXXXXX (no extension)")
+    ap.add_argument(
+        "run",
+        help="the run directory (the one holding config.yaml), or any path "
+        "inside it such as a checkpoints/step_XXXXXXX file",
+    )
+    ap.add_argument(
+        "--checkpoint",
+        default=None,
+        help="which checkpoint to load, if deprl.load supports selecting one "
+        "(e.g. 'last', or a step number). Default: whatever the run's "
+        "config.yaml specifies, which is 'last'.",
+    )
     ap.add_argument("--stage", default="A")
     ap.add_argument("--episodes", type=int, default=10)
     ap.add_argument("--seed", type=int, default=1000)
@@ -49,6 +101,8 @@ def main() -> int:
 
     import deprl
 
+    run_dir = resolve_run_dir(Path(args.run))
+
     env = gym.make(
         scv4.env_id_for(args.stage), strict_crutch=not args.no_strict_crutch
     )
@@ -57,7 +111,10 @@ def main() -> int:
     limit = int(args.max_steps or spec.episode_steps)
 
     print("=" * 78)
-    print("checkpoint :", args.checkpoint)
+    print("run dir    :", run_dir)
+    available = sorted((run_dir / "checkpoints").glob("step_*")) if (run_dir / "checkpoints").is_dir() else []
+    if available:
+        print("checkpoints: %d found, latest %s" % (len(available), available[-1].name))
     print("stage      :", spec.describe())
     print("episodes   :", args.episodes)
     if spec.rsi is not None:
@@ -65,7 +122,7 @@ def main() -> int:
               % (spec.rsi.velocity_scale, spec.rsi.posture_reference))
     print("=" * 78)
 
-    policy = deprl.load(args.checkpoint, environment=env)
+    policy = load_policy(deprl, run_dir, env, args.checkpoint)
 
     per_episode = []
     term_totals = defaultdict(list)
