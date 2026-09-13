@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -101,6 +102,15 @@ def pick(fields: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
     return None
 
 
+def stage_from_path(path: Path) -> str:
+    """Recover the stage letter from a run directory name.
+
+    Run directories are named crutch_v4_stage_<X>_<description>.
+    """
+    match = re.search(r"stage_([A-Da-d])(?:[_\W]|$)", str(path))
+    return match.group(1).upper() if match else "A"
+
+
 def find_term_columns(fields: Sequence[str]) -> Dict[str, str]:
     """Map term name -> column, for whichever reward components got logged."""
     found = {}
@@ -176,8 +186,8 @@ def report(path: Path, tail: int, plot: bool, show: bool) -> int:
                   % len({c.split("/")[2] for c in sconegym_cols if c.count("/") > 2}))
             print("sconegym components instead (constr, grf, smooth, ...), which are")
             print("0.0 for a muscle-free model. For a term breakdown run:")
-            print("  python scripts/eval_checkpoint.py <checkpoint> --stage %s"
-                  % ("B" if "stage_B" in str(path) else "A"))
+            print("  python scripts/eval_checkpoint.py %s --stage %s"
+                  % (path.parent, stage_from_path(path)))
     if terms:
         print()
         print("reward components (last %d epochs)" % len(shown))
