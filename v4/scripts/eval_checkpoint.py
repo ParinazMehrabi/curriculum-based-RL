@@ -29,6 +29,7 @@ import argparse
 import os
 import re
 import sys
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -116,6 +117,63 @@ def list_checkpoints(run_dir: Path):
     if not folder.is_dir():
         return []
     return sorted(folder.glob("step_*"), key=step_number)
+
+
+def find_stored(output_dir, since: float):
+    """Locate the .sto files Hyfydy just wrote.
+
+    sconegym sets env.output_dir to a bare timestamped folder name with no
+    parent, and Hyfydy resolves it against its own results root, so the path
+    cannot be assumed. Look for that folder under each plausible root, then
+    fall back to any .sto written since the run started.
+    """
+    roots = [Path.cwd()] + list(RESULT_ROOTS)
+    env_root = os.environ.get("SCONE_RESULTS")
+    if env_root:
+        roots.insert(0, Path(env_root))
+
+    name = Path(str(output_dir)).name if output_dir else None
+    if name:
+        for root in roots:
+            candidate = root / name
+            if candidate.is_dir():
+                found = sorted(candidate.glob("*.sto"))
+                if found:
+                    return candidate, found
+
+    # Fall back to anything written during this run.
+    fresh = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for f in root.rglob("*.sto"):
+            try:
+                if f.stat().st_mtime >= since:
+                    fresh.append(f)
+            except OSError:
+                continue
+    if fresh:
+        fresh.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        return fresh[0].parent, fresh
+    return None, []
+
+
+def report_stored(output_dir, since: float, episodes: int) -> None:
+    folder, files = find_stored(output_dir, since)
+    print()
+    if not files:
+        print("No .sto files found. env.output_dir was %r, searched:" % output_dir)
+        for root in [Path.cwd()] + list(RESULT_ROOTS):
+            print("  %s %s" % (root, "(exists)" if root.is_dir() else "(missing)"))
+        print("Check SCONE Studio's results folder in Tools > Preferences.")
+        return
+    print("SCONE result files (%d) in:" % len(files))
+    print("  %s" % folder)
+    for f in sorted(files, key=lambda f: f.stat().st_mtime, reverse=True)[:episodes]:
+        print("    %s  (%.1f KB)" % (f.name, f.stat().st_size / 1024.0))
+    print()
+    print("Open the newest in SCONE Studio and press play, then use its video")
+    print("export for an mp4. The model is named in the .sto header.")
 
 
 def resolve_checkpoint(run_dir: Path, requested):
@@ -334,6 +392,8 @@ def main() -> int:
 
     import deprl  # noqa: F401  (imported here so --help works without it)
 
+    started_at = time.time() - 1.0
+
     if args.run is None:
         run_dir = find_latest_run(args.stage)
         print("using newest stage %s run: %s" % (args.stage.upper(), run_dir.name))
@@ -436,21 +496,7 @@ def main() -> int:
         )
 
     if args.store:
-        out = Path(getattr(u, "output_dir", "."))
-        print()
-        print("SCONE result files in %s:" % out)
-        if out.is_dir():
-            written = sorted(
-                out.glob("*.sto"), key=lambda f: f.stat().st_mtime, reverse=True
-            )[: args.episodes]
-            for f in written:
-                print("  %s  (%.1f KB)" % (f.name, f.stat().st_size / 1024.0))
-            if written:
-                print()
-                print("Open the newest in SCONE Studio (File > Open, or double-click)")
-                print("and press play. The model comes from the .sto header.")
-        else:
-            print("  directory not found; check env.output_dir")
+        report_stored(getattr(u, "output_dir", None), started_at, args.episodes)
 
     if crutch_force:
         arr = np.asarray(crutch_force, dtype=float)
