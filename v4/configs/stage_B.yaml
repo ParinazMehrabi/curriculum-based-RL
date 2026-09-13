@@ -61,16 +61,20 @@ tonic:
   #  2. The reward function changes at this boundary, so the critic arrives
   #     mis-calibrated. Expect a dip. A critic warm-up or return
   #     normalisation is the next thing worth adding here.
-  # Stage A run 260912.135956 plateaued near episode_score 550 with
-  # episode_length pinned at 1000: it holds all 301 reference poses for a full
-  # 10 s. step_5600000 scored 609 at length 1000 and sits inside a stable
-  # window, which is the selection criterion -- not the single best epoch
-  # (762 at 5.43M, which is not a save point anyway).
+  # Stage A run 260912.135956 ran the full 10M steps. It plateaued near
+  # episode_score 550 from about 5.3M onward (best 704.6) with episode_length
+  # still reaching 1000, i.e. it holds all 301 reference poses for a full 10 s.
+  # The last 4.4M steps bought nothing.
+  #
+  # step_10000000 is the end of that run: 609 at length 970, inside a stable
+  # window (498-609 at length 900-1000 over the final 120k steps). Taking the
+  # final checkpoint of a plateaued run avoids cherry-picking a lucky epoch,
+  # which is the mistake v3's hand-picked mid-run checkpoints invited.
   #
   # VERIFY THIS PATH EXISTS FIRST. It is machine-specific, the same wart v3 had.
   before_training: >
     agent.load(
-      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_A_stand\260912.135956.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_5600000',
+      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_A_stand\260912.135956.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_10000000',
       only_checkpoint=True
     )
   after_training: ''
