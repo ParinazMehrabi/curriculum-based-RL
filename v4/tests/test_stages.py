@@ -139,8 +139,12 @@ def test_lag_terms_use_the_neutral_references():
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef)
     }
-    assert "pelvis_foot_offset_ref" in bodies["_term_pelvis_lag"]
-    assert "crutch_offset_ref" in bodies["_term_crutch_forward"]
+    # Under RSI these are re-measured per episode into _lag_ref / _crutch_ref;
+    # the TermParams values remain the non-RSI fallback, set in reset().
+    assert "self._lag_ref" in bodies["_term_pelvis_lag"]
+    assert "self._crutch_ref" in bodies["_term_crutch_forward"]
+    assert "pelvis_foot_offset_ref" in src
+    assert "crutch_offset_ref" in src
 
 
 def test_neutral_pose_scores_one_for_both_lag_terms():

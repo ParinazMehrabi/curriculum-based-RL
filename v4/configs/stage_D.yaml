@@ -1,5 +1,17 @@
 # Stage D -- crutch placement and trunk-over-feet correction. Warm-starts from C.
 #
+# Same RSI as A, B and C, and the same widened hip_knee_sigma (0.60) as C, since
+# this stage also has to stride.
+#
+# New this stage: crutch_forward (0.20) and pelvis_lag (0.20), plus backward
+# raised to 0.45 and the crutch load target lowered from 15% to 8% of body
+# weight -- the model should now rely on the crutches less.
+#
+# Both new terms measure deviation from offsets taken at the episode's own start
+# frame, not from the neutral pose: the pelvis-to-foot gap swings through the
+# stride, so a fixed reference would be wrong on most frames. Neither term has
+# ever been exercised in training, so watch them in the first eval.
+#
 # Stage configuration (reward weights, sigmas, reset distribution) lives in
 # sconegym_crutch_v4/stages.py, NOT in this file. v3 carried an env_args block
 # here, but nothing in the package ever read it and it was never confirmed that
@@ -51,9 +63,18 @@ tonic:
   #  2. The reward function changes at this boundary, so the critic arrives
   #     mis-calibrated. Expect a dip. A critic warm-up or return
   #     normalisation is the next thing worth adding here.
+  # Stage C run 260913.120005 finished 10M steps: last-10-epoch mean 634,
+  # best 717, episode_length pinned at 1000. Its step_500000 policy already had
+  # posture 0.69, crutch 0.89, zero falls.
+  #
+  # VERIFY THIS CHECKPOINT EXISTS. Stage A stopped writing checkpoints at 5.7M
+  # despite training to 10M, so the last file may be earlier than the last step.
+  # Check with:
+  #   python scripts/eval_checkpoint.py --stage C
+  # which prints the checkpoint range, then set the number below to match.
   before_training: >
     agent.load(
-      r'REPLACE_ME/checkpoints/stage_C/step_XXXXXXX',
+      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_C_tiny_forward\260913.120005.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_10000000',
       only_checkpoint=True
     )
   after_training: ''

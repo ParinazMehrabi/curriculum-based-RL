@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from _bootstrap import PKG_DIR, load, load_trajectory
+from _bootstrap import PKG_DIR, env_source, load, load_trajectory
 
 rewards, stages = load()
 trajectory = load_trajectory()
@@ -207,8 +207,37 @@ def test_stage_c_matches_the_shared_rsi():
     assert c.posture_reference == a.posture_reference
 
 
-def test_stage_d_does_not_use_rsi_yet():
-    assert stages.STAGES["D"].rsi is None
+def test_every_stage_shares_the_same_rsi():
+    """All four stages must reset from the same distribution.
+
+    Each transfer is a warm start; changing the initial-state distribution or
+    the posture reference at a boundary discards what the previous stage learned.
+    """
+    base = stages.STAGES["A"].rsi
+    for key in stages.STAGE_ORDER:
+        rsi = stages.STAGES[key].rsi
+        assert rsi is not None, key
+        assert rsi.trajectory == base.trajectory, key
+        assert rsi.velocity_scale == base.velocity_scale, key
+        assert rsi.posture_reference == base.posture_reference, key
+        assert rsi.phase_range == base.phase_range, key
+
+
+def test_moving_stages_loosen_hip_knee():
+    """C and D have to stride; A and B only have to stand."""
+    for key in ("C", "D"):
+        assert stages.STAGES[key].terms.hip_knee_sigma > stages.STAGES["A"].terms.hip_knee_sigma, key
+    for key in ("A", "B"):
+        assert stages.STAGES[key].terms.hip_knee_sigma == 0.35, key
+
+
+def test_lag_terms_use_the_measured_episode_reference():
+    """Under RSI the offsets are re-measured per episode, not taken from
+    TermParams, because they swing through the stride."""
+    src = env_source()
+    assert "_measure_geometry_refs" in src
+    assert "self._crutch_ref - offset" in src
+    assert "- self._lag_ref" in src
 
 
 def test_stage_c_loosens_hip_knee_for_locomotion():

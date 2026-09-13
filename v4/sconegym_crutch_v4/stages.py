@@ -391,7 +391,11 @@ STAGE_D = StageSpec(
     terms=TermParams(
         pelvis_tilt_sigma=0.15,
         lumbar_sigma=0.18,
-        hip_knee_sigma=0.35,
+        # Widened from 0.35 for the same reason as stage C: this stage moves,
+        # and at 0.35 the 0.45-weighted posture term scores about 0.05 for any
+        # real stride, opposing velocity. Widening it in C took posture from
+        # 0.23 to 0.69, the single biggest gain in the curriculum so far.
+        hip_knee_sigma=0.60,
         height_drop_sigma=0.18,
         cane_target_load_fraction=0.08,
         # Widened from 0.15 to match stage C. With the tighter value the 8%
@@ -408,10 +412,22 @@ STAGE_D = StageSpec(
     # never exceeded 0.043. Match C so the target is reachable at step 1.
     initial_forward_velocity=0.02,
     initial_forward_velocity_std=0.01,
+    reset_position_std=0.01,
+    reset_velocity_std=0.01,
     # v3's stage D config declared init_load twice (0.5 then 0.4); the second
     # silently won. Resolved here to 0.5 to match stages A-C. Override in YAML
     # if 0.4 was in fact intended.
     init_load=0.5,
+    # Same RSI as A, B and C. crutch_forward and pelvis_lag now measure against
+    # offsets taken from the episode's own start frame rather than the neutral
+    # pose: the pelvis-to-foot gap swings through the stride, so a fixed 0.101 m
+    # reference would be wrong for most frames -- the same class of mistake that
+    # left both terms pinned when they were measured against zero.
+    rsi=RSIConfig(
+        trajectory="models/reference/gaitTracking_solution_raw.sto",
+        velocity_scale=0.0,
+        posture_reference=INIT_FRAME,
+    ),
 )
 
 

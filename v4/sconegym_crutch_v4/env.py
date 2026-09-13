@@ -221,6 +221,14 @@ class CrutchCurriculumGym(GaitGym):
         self._posture_ref = self._neutral_posture_ref()
         self._height_ref_y = self._base_pelvis_y
 
+        # Geometry references for pelvis_lag and crutch_forward. Default to the
+        # neutral-pose values measured by scripts/calibrate.py; with RSI and
+        # posture_reference="init" they are re-measured at each reset, because
+        # the pelvis-to-foot offset swings through the stride (one foot forward,
+        # one back) and a fixed 0.101 m would be wrong for most frames.
+        self._lag_ref = float(spec.terms.pelvis_foot_offset_ref)
+        self._crutch_ref = float(spec.terms.crutch_offset_ref)
+
         self.stage_spec.reward.warn_if_unsafe(
             gamma=float(gamma_for_safety_check), label=self.curriculum_stage
         )
@@ -444,8 +452,45 @@ class CrutchCurriculumGym(GaitGym):
         if self.init_load > 0:
             self.model.adjust_state_for_load(self.init_load)
 
+        if rsi is not None and rsi.posture_reference == INIT_FRAME:
+            self._measure_geometry_refs()
+        else:
+            self._lag_ref = float(spec.terms.pelvis_foot_offset_ref)
+            self._crutch_ref = float(spec.terms.crutch_offset_ref)
+
         obs = self._get_obs()
         return (obs, {}) if return_info else obs
+
+    def _measure_geometry_refs(self) -> None:
+        """Take the pelvis-to-foot and pelvis-to-crutch offsets as they are now.
+
+        Called after the state has been set and settled, so these describe the
+        frame this episode actually starts from rather than the neutral pose.
+        """
+        pelvis_x = self._pelvis_body_x()
+        if pelvis_x is None:
+            return
+        foot_xs = []
+        for body in self._foot_bodies:
+            if body is None:
+                continue
+            try:
+                foot_xs.append(self._vec_x(body.com_pos()))
+            except Exception:
+                continue
+        if foot_xs:
+            self._lag_ref = float(min(foot_xs) - pelvis_x)
+
+        cane_xs = []
+        for body in self._cane_bodies:
+            if body is None:
+                continue
+            try:
+                cane_xs.append(self._vec_x(body.com_pos()))
+            except Exception:
+                continue
+        if cane_xs:
+            self._crutch_ref = float(min(cane_xs) - pelvis_x)
 
     def _rate_limit(self, action) -> np.ndarray:
         action = np.asarray(action, dtype=np.float32)
@@ -589,7 +634,7 @@ class CrutchCurriculumGym(GaitGym):
             # from the pelvis itself. The crutches are welded to the forearms
             # and rest ~5 cm ahead of the pelvis, so measuring against zero
             # made this term a constant 1.0 that discriminated nothing.
-            shortfall = (t.crutch_offset_ref - offset) - t.crutch_forward_margin
+            shortfall = (self._crutch_ref - offset) - t.crutch_forward_margin
             scores.append(gaussian(max(0.0, shortfall), t.crutch_forward_sigma))
         return float(np.mean(scores)) if scores else 0.0
 
@@ -638,7 +683,7 @@ class CrutchCurriculumGym(GaitGym):
                 continue
         if not xs:
             return 1.0
-        excess_lag = (min(xs) - pelvis_x) - t.pelvis_foot_offset_ref
+        excess_lag = (min(xs) - pelvis_x) - self._lag_ref
         return gaussian(max(0.0, excess_lag), t.pelvis_lag_sigma)
 
     _TERM_FNS = {
