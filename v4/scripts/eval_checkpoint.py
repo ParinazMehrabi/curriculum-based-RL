@@ -10,7 +10,8 @@ breakdown is not.
 
 So: load a checkpoint, run episodes, read env.term_values directly.
 
-    python scripts/eval_checkpoint.py <run-dir> --stage B
+    python scripts/eval_checkpoint.py --stage C              # newest stage C run
+    python scripts/eval_checkpoint.py --stage C --checkpoint 100000
     python scripts/eval_checkpoint.py <run-dir> --stage B --episodes 20 --plot
 
 <run-dir> is the directory holding config.yaml, e.g.
@@ -41,6 +42,46 @@ import gym
 import sconegym  # noqa: F401
 
 import sconegym_crutch_v4 as scv4
+
+
+# Where deprl writes runs on this project's training machine.
+RESULT_ROOTS = (
+    Path.home() / "Documents" / "SCONE" / "results",
+    Path("C:/Users/FUM Care/Documents/SCONE/results"),
+    REPO_V4.parent / "results",
+)
+
+
+def find_latest_run(stage: str) -> Path:
+    """Newest run directory for a stage, so the timestamp need not be typed."""
+    import os
+
+    roots = list(RESULT_ROOTS)
+    env_root = os.environ.get("SCONE_RESULTS")
+    if env_root:
+        roots.insert(0, Path(env_root))
+
+    needle = "stage_%s" % stage.upper()
+    candidates = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for config in root.rglob("config.yaml"):
+            if needle in str(config.parent):
+                candidates.append(config.parent)
+    if not candidates:
+        raise FileNotFoundError(
+            "no run directory found for stage %s. Searched:%s%s"
+            % (
+                stage.upper(),
+                chr(10),
+                chr(10).join(
+                    "  %s %s" % (r, "(exists)" if r.is_dir() else "(missing)")
+                    for r in roots
+                ),
+            )
+        )
+    return max(set(candidates), key=lambda d: d.stat().st_mtime)
 
 
 def resolve_run_dir(path: Path) -> Path:
@@ -204,8 +245,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "run",
+        nargs="?",
+        default=None,
         help="the run directory (the one holding config.yaml), or any path "
-        "inside it such as a checkpoints/step_XXXXXXX file",
+        "inside it such as a checkpoints/step_XXXXXXX file. Omit it to use the "
+        "newest run found for --stage.",
     )
     ap.add_argument(
         "--checkpoint",
@@ -242,7 +286,11 @@ def main() -> int:
 
     import deprl  # noqa: F401  (imported here so --help works without it)
 
-    run_dir = resolve_run_dir(Path(args.run))
+    if args.run is None:
+        run_dir = find_latest_run(args.stage)
+        print("using newest stage %s run: %s" % (args.stage.upper(), run_dir.name))
+    else:
+        run_dir = resolve_run_dir(Path(args.run))
 
     if args.sweep_phase > 0:
         return sweep_phase(deprl, run_dir, args)
