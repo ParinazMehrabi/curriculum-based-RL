@@ -66,15 +66,19 @@ tonic:
   # still reaching 1000, i.e. it holds all 301 reference poses for a full 10 s.
   # The last 4.4M steps bought nothing.
   #
-  # step_10000000 is the end of that run: 609 at length 970, inside a stable
-  # window (498-609 at length 900-1000 over the final 120k steps). Taking the
-  # final checkpoint of a plateaued run avoids cherry-picking a lucky epoch,
-  # which is the mistake v3's hand-picked mid-run checkpoints invited.
+  # step_5700000 is the LAST checkpoint that actually exists. The run trained to
+  # 10M but deprl stopped writing checkpoints at 5.7M (57 files, one per 100k),
+  # so there is nothing later to load. No loss: the score had already plateaued
+  # near 550 by 5.3M.
+  #
+  # Verify with:
+  #   python scripts/eval_checkpoint.py <run-dir> --stage A
+  # which prints the checkpoint range it can see.
   #
   # VERIFY THIS PATH EXISTS FIRST. It is machine-specific, the same wart v3 had.
   before_training: >
     agent.load(
-      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_A_stand\260912.135956.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_10000000',
+      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_A_stand\260912.135956.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_5700000',
       only_checkpoint=True
     )
   after_training: ''
