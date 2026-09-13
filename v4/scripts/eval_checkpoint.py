@@ -324,7 +324,12 @@ def main() -> int:
         "not statically holdable.",
     )
     ap.add_argument("--plot", action="store_true")
-    ap.add_argument("--store", action="store_true", help="write SCONE result files")
+    ap.add_argument(
+        "--store",
+        action="store_true",
+        help="write SCONE .sto result files for each episode, so the motion can "
+        "be played back in SCONE Studio",
+    )
     args = ap.parse_args()
 
     import deprl  # noqa: F401  (imported here so --help works without it)
@@ -361,6 +366,8 @@ def main() -> int:
     if spec.rsi is not None:
         print("RSI        : velocity_scale %.2f, posture ref %s"
               % (spec.rsi.velocity_scale, spec.rsi.posture_reference))
+    if args.store:
+        print("storing   : SCONE result files -> %s" % getattr(u, "output_dir", "?"))
     print("=" * 78)
 
     policy = load_policy(deprl, run_dir, env, args.checkpoint)
@@ -427,6 +434,23 @@ def main() -> int:
             "  %-16s %.4f   (per-episode min %.4f max %.4f)   weight %.2f"
             % (name, vals.mean(), vals.min(), vals.max(), weights.get(name, 0.0))
         )
+
+    if args.store:
+        out = Path(getattr(u, "output_dir", "."))
+        print()
+        print("SCONE result files in %s:" % out)
+        if out.is_dir():
+            written = sorted(
+                out.glob("*.sto"), key=lambda f: f.stat().st_mtime, reverse=True
+            )[: args.episodes]
+            for f in written:
+                print("  %s  (%.1f KB)" % (f.name, f.stat().st_size / 1024.0))
+            if written:
+                print()
+                print("Open the newest in SCONE Studio (File > Open, or double-click)")
+                print("and press play. The model comes from the .sto header.")
+        else:
+            print("  directory not found; check env.output_dir")
 
     if crutch_force:
         arr = np.asarray(crutch_force, dtype=float)
