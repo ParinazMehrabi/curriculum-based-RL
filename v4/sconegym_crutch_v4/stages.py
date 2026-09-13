@@ -375,15 +375,24 @@ STAGE_D = StageSpec(
             "posture": 0.45,
             "crutch": 0.15,
             "crutch_forward": 0.20,
-            "velocity": 0.25,
-            "backward": 0.45,
+            # Raised from 0.25. With 8 terms the geometric mean gave velocity an
+            # exponent of only 0.128, so standing perfectly still scored about
+            # 0.79/step against 0.95 for walking at target -- a 17% gap for
+            # behaviour that is far harder and risks the -5.0 fall penalty.
+            # Standing was the rational choice.
+            "velocity": 0.60,
+            # Lowered from 0.45. backward returns 1.0 for any v >= 0, so a
+            # motionless model satisfies it perfectly; weighting it second
+            # highest was paying the policy to stay put.
+            "backward": 0.25,
             "displacement": 0.05,
-            # pelvis_forward is deliberately absent. It is clip(travel/cap, 0, 1),
-            # which measured a flat 0.0 for an entire episode because the model
-            # drifts backward (-0.075 m) under zero torque. It was contributing a
-            # permanent multiplicative tax with no gradient, and it duplicates
-            # what velocity already rewards. Re-add with w_pelvis_forward if a
-            # trained policy actually travels forward.
+            # Re-added at 0.30. This is clip(travel/cap, 0, 1), the only term
+            # that rewards distance actually covered. It was dropped when it
+            # measured a flat 0.0 -- but that was under zero torque, where the
+            # model drifts backward. Stage C travels forward, so the term now
+            # has gradient and its removal had left velocity as the sole
+            # incentive to move.
+            "pelvis_forward": 0.30,
             "pelvis_lag": 0.20,
         },
         fall_penalty=5.0,

@@ -171,11 +171,45 @@ def test_lag_terms_discriminate_away_from_neutral():
     assert 0.1 < rewards.gaussian(max(0.0, shortfall), t.crutch_forward_sigma) < 0.9
 
 
-def test_stage_d_drops_the_dead_progress_term():
-    """pelvis_forward measured a flat 0.0 for a whole episode; it is gone."""
-    assert "pelvis_forward" not in STAGES["D"].reward.active_weights
-    for key, stage in STAGES.items():
-        assert "pelvis_forward" not in stage.reward.active_weights, key
+def test_only_stage_d_rewards_progress():
+    """pelvis_forward belongs only where the model can actually travel."""
+    assert "pelvis_forward" in STAGES["D"].reward.active_weights
+    for key in ("A", "B", "C"):
+        assert "pelvis_forward" not in STAGES[key].reward.active_weights, key
+
+
+def test_standing_still_is_clearly_worse_than_walking_in_stage_d():
+    """The reason stage D was reweighted.
+
+    Standing still maximises posture, backward, displacement, crutch_forward and
+    pelvis_lag simultaneously -- 49% of the original weight. Only velocity and
+    pelvis_forward penalise it. If the gap between standing and walking is
+    small, standing wins because it is easier and risks no fall penalty.
+    """
+    spec = STAGES["D"].reward
+    d = STAGES["D"]
+
+    def score(moving: bool):
+        terms = {t: 1.0 for t in spec.required_terms}
+        if not moving:
+            # velocity at v=0 against a 0.03 target; no distance covered
+            terms["velocity"] = rewards.gaussian(-d.target_vel, d.velocity_sigma)
+            terms["pelvis_forward"] = 0.0
+        total, _ = spec.compose(terms)
+        return total
+
+    standing, walking = score(False), score(True)
+    assert walking > standing
+    gap = (walking - standing) / walking
+    assert gap > 0.35, "standing still is only %.0f%% worse than walking" % (100 * gap)
+
+
+def test_stage_d_weights_moving_over_staying_put():
+    """velocity plus pelvis_forward must outweigh the terms standing satisfies."""
+    w = STAGES["D"].reward.active_weights
+    moving = w["velocity"] + w["pelvis_forward"]
+    still = w["backward"] + w["displacement"]
+    assert moving > still
 
 
 def test_stage_d_velocity_target_is_reachable_at_reset():

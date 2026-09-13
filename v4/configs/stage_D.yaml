@@ -3,9 +3,21 @@
 # Same RSI as A, B and C, and the same widened hip_knee_sigma (0.60) as C, since
 # this stage also has to stride.
 #
-# New this stage: crutch_forward (0.20) and pelvis_lag (0.20), plus backward
-# raised to 0.45 and the crutch load target lowered from 15% to 8% of body
-# weight -- the model should now rely on the crutches less.
+# New this stage: crutch_forward (0.20), pelvis_lag (0.20) and pelvis_forward
+# (0.30), with the crutch load target lowered from 15% to 8% of body weight --
+# the model should now rely on the crutches less.
+#
+# The weights were rebalanced toward moving. As first written, standing
+# perfectly still scored about 0.79/step against 0.95 for walking at target: a
+# 17% gap for behaviour that is much harder and risks the -5.0 fall penalty, so
+# standing was the rational choice. posture, backward, displacement,
+# crutch_forward and pelvis_lag are all maximised by staying put, which was 49%
+# of the weight, while only velocity (0.25) rewarded motion.
+#
+# velocity is now 0.60, backward is down to 0.25 (it returns 1.0 for any v >= 0,
+# so a motionless model satisfies it perfectly), and pelvis_forward is back at
+# 0.30 as the only term that rewards distance actually covered. Standing still
+# now scores about 0.53 against 1.00 for walking -- a 47% gap.
 #
 # Both new terms measure deviation from offsets taken at the episode's own start
 # frame, not from the neutral pose: the pelvis-to-foot gap swings through the

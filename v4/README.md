@@ -233,6 +233,35 @@ velocities, finite-differences velocities that are absent, and reports which
 convention it matched rather than guessing silently. A dof missing from the file
 raises and lists what the file does contain.
 
+### 8. Stage D rewards moving, not staying put
+
+As first written, stage D paid almost nothing for locomotion. Of its 1.95 total
+weight only `velocity` (0.25) rewarded motion, while `posture`, `backward`,
+`displacement`, `crutch_forward` and `pelvis_lag` — 0.95 of weight, 49% — are all
+*maximised by standing still*. `backward` in particular returns 1.0 for any
+`v >= 0`, so a motionless model satisfies it perfectly.
+
+Through the geometric mean that made standing still worth about **0.79/step**
+against **0.95** for walking at the 0.03 m/s target: a 17% gap for behaviour
+that is far harder and risks the one-off -5.0 fall penalty. Standing was the
+rational choice, and a ~800 episode score was the model doing exactly that.
+
+Three changes, all in `STAGE_D`:
+
+| weight | was | now | why |
+|---|---|---|---|
+| `velocity` | 0.25 | **0.60** | with 8 terms its exponent was only 0.128 |
+| `backward` | 0.45 | **0.25** | it rewards standing; second-highest weight was paying the policy to stay put |
+| `pelvis_forward` | absent | **0.30** | the only term rewarding distance covered |
+
+Standing still now scores **0.53** against **1.00** for walking — a 47% gap.
+
+`pelvis_forward` had been dropped when it measured a flat 0.0, but that was
+under zero torque where the model drifts backward. Stage C travels forward, so
+the term has gradient again. Two tests pin this: that standing still is at least
+35% worse than walking, and that the motion weights outweigh the ones rest
+satisfies.
+
 ## Setup
 
 Python 3.9, from the repository root:
