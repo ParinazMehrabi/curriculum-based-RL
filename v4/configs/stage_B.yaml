@@ -1,10 +1,25 @@
 # Stage B -- standing with crutch load sharing. Warm-starts from stage A.
 #
-# Stage B uses the SAME reference-state initialisation as stage A (same
-# trajectory, velocity_scale 0.0, posture_reference "init"), so crutch load is
-# the only new axis. Stage A learned to hold the reference's forward-leaning
-# poses; resetting upright here and scoring posture against upright would change
-# the initial-state distribution, the posture reference and the reward at once.
+# Stage B keeps stage A's trajectory and posture reference, but narrows RSI to
+# the four keyframes of the reciprocal crutch-gait cycle instead of sampling the
+# whole record. Detected by scripts/find_keyframes.py:
+#
+#     0.53 s  frame  25  crutch_r     cycle period 3.41 s
+#     1.17 s  frame  55  leg_l        right crutch advances with the LEFT leg
+#     2.18 s  frame 102  crutch_l     left crutch advances with the RIGHT leg
+#     3.03 s  frame 142  leg_r
+#     3.82 s  frame 179  crutch_r  <- second cycle
+#     4.61 s  frame 216  leg_l
+#     5.67 s  frame 266  crutch_l
+#
+# Seven windows, half-width 0.15 s. Stage A learned to hold an arbitrary pose
+# from anywhere in the cycle; stage B learns to hold the specific poses the gait
+# is built from. velocity_scale stays 0.0, so each pose arrives at rest and the
+# task is static -- stand in this configuration without falling, with the
+# crutches taking their share of the load. Connecting the poses into motion is
+# a later stage's job.
+#
+# Re-derive the windows with: python scripts/find_keyframes.py --plot
 #
 # New this stage: crutch load sharing at 15% of body weight (95 N of 631 N),
 # sigma fraction 0.15, gated by a smoothstep over 10-30 N of contact force. The

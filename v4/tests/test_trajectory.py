@@ -333,3 +333,93 @@ def test_real_reference_leans_forward_throughout():
     assert tilt.max() < -0.3
     sigma = stages.STAGES["A"].terms.pelvis_tilt_sigma
     assert rewards.gaussian(float(tilt.max()), sigma) < 0.01
+
+
+# -- keyframe curriculum ----------------------------------------------------
+
+
+def test_keyframes_cover_the_four_sub_movements():
+    """Reciprocal crutch gait: crutch forward, then the OPPOSITE leg forward."""
+    assert set(stages.GAIT_KEYFRAMES) == {"crutch_r", "leg_l", "crutch_l", "leg_r"}
+
+
+def test_keyframe_windows_are_disjoint_and_ordered():
+    windows = stages.KEYFRAME_WINDOWS
+    assert windows == tuple(sorted(windows))
+    for (a_lo, a_hi), (b_lo, b_hi) in zip(windows, windows[1:]):
+        assert a_hi <= b_lo, "windows %s and %s overlap" % ((a_lo, a_hi), (b_lo, b_hi))
+
+
+def test_keyframe_windows_are_valid_fractions():
+    for lo, hi in stages.KEYFRAME_WINDOWS:
+        assert 0.0 <= lo < hi <= 1.0
+
+
+def test_keyframes_follow_the_contralateral_order():
+    """Within a cycle: crutch_r, leg_l, crutch_l, leg_r.
+
+    The right crutch advances with the LEFT leg; getting this backwards would
+    train an ipsilateral pattern, which is not how crutch gait works.
+    """
+    first = {name: windows[0][0] for name, windows in stages.GAIT_KEYFRAMES.items()}
+    order = sorted(first, key=lambda n: first[n])
+    assert order == ["crutch_r", "leg_l", "crutch_l", "leg_r"]
+
+
+def test_stage_b_samples_only_the_keyframes():
+    rsi = stages.STAGES["B"].rsi
+    assert rsi.phase_windows == stages.KEYFRAME_WINDOWS
+    assert rsi.velocity_scale == 0.0, "the keyframe task is static"
+
+
+def test_stage_a_still_samples_the_whole_cycle():
+    """A is general balance; only B narrows to the gait events."""
+    assert stages.STAGES["A"].rsi.phase_windows is None
+
+
+def test_window_sampling_hits_every_window():
+    traj = _synthetic(n=301)
+    rng = np.random.RandomState(0)
+    windows = stages.KEYFRAME_WINDOWS
+    seen_windows = set()
+    for _ in range(2000):
+        idx, _, _ = traj.sample_frame(rng, phase_windows=windows)
+        frac = idx / (traj.n_frames - 1)
+        hit = [w for w in windows if w[0] - 0.01 <= frac <= w[1] + 0.01]
+        assert hit, "frame %d (frac %.4f) is outside every window" % (idx, frac)
+        seen_windows.add(hit[0])
+    assert seen_windows == set(windows)
+
+
+def test_window_sampling_excludes_the_gaps():
+    """Nothing between the keyframes should ever be sampled."""
+    traj = _synthetic(n=301)
+    rng = np.random.RandomState(1)
+    windows = stages.KEYFRAME_WINDOWS
+    for _ in range(1000):
+        idx, _, _ = traj.sample_frame(rng, phase_windows=windows)
+        frac = idx / (traj.n_frames - 1)
+        assert any(w[0] - 0.01 <= frac <= w[1] + 0.01 for w in windows)
+
+
+def test_phase_windows_takes_precedence_over_phase_range():
+    traj = _synthetic(n=301)
+    rng = np.random.RandomState(2)
+    # A phase_range that excludes the first window, overridden by windows.
+    idx, _, _ = traj.sample_frame(rng, phase_range=(0.9, 1.0), phase_windows=((0.0, 0.05),))
+    assert idx <= 16
+
+
+def test_rsi_rejects_bad_phase_windows():
+    with pytest.raises(ValueError):
+        stages.RSIConfig(phase_windows=())
+    with pytest.raises(ValueError):
+        stages.RSIConfig(phase_windows=((0.5, 0.4),))
+    with pytest.raises(ValueError):
+        stages.RSIConfig(phase_windows=((-0.1, 0.4),))
+
+
+def test_phase_windows_are_overridable():
+    stage = stages.STAGES["B"].with_overrides(rsi_phase_windows=((0.0, 0.1),))
+    assert stage.rsi.phase_windows == ((0.0, 0.1),)
+    assert stages.STAGES["B"].rsi.phase_windows == stages.KEYFRAME_WINDOWS

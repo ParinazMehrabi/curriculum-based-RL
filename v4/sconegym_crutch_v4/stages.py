@@ -27,6 +27,34 @@ CRUTCH_POSE_TERMS = ("crutch_forward",)
 #   python -c "import sys; sys.path.insert(0,'.'); from sconegym_crutch_v4.trajectory import load_sto; t=load_sto('../models/reference/gaitTracking_solution_raw.sto',['pelvis_tx']); print(t.dq[:,0].mean())"
 REFERENCE_SPEED = 0.142
 
+# The four sub-movements of reciprocal crutch gait, as windows into the
+# reference expressed as fractions of the record. Detected by
+# scripts/find_keyframes.py, which finds peaks in arm_flex_r/l (the crutches are
+# welded to the forearms, so arm flexion is crutch position) and hip_flexion_r/l:
+#
+#     0.53 s  frame  25  crutch_r     cycle period 3.41 s (160 frames)
+#     1.17 s  frame  55  leg_l        right crutch advances with the LEFT leg
+#     2.18 s  frame 102  crutch_l     left crutch advances with the RIGHT leg
+#     3.03 s  frame 142  leg_r
+#     3.82 s  frame 179  crutch_r  <- second cycle
+#     4.61 s  frame 216  leg_l
+#     5.67 s  frame 266  crutch_l
+#
+# leg_r recurs at the very end of the record, past the last detectable peak,
+# which is why it has one window and the others have two. Half-width 0.15 s.
+#
+# Re-derive with: python scripts/find_keyframes.py
+GAIT_KEYFRAMES: Dict[str, Tuple[Tuple[float, float], ...]] = {
+    "crutch_r": ((0.0599, 0.1068), (0.5732, 0.6201)),
+    "leg_l": ((0.1599, 0.2068), (0.6966, 0.7434)),
+    "crutch_l": ((0.3166, 0.3634), (0.8632, 0.9101)),
+    "leg_r": ((0.4499, 0.4968),),
+}
+
+KEYFRAME_WINDOWS: Tuple[Tuple[float, float], ...] = tuple(
+    sorted(w for windows in GAIT_KEYFRAMES.values() for w in windows)
+)
+
 
 @dataclass(frozen=True)
 class TermParams:
@@ -98,6 +126,12 @@ class RSIConfig:
     # Restrict sampling to a sub-window of the reference, as fractions.
     phase_range: Tuple[float, float] = (0.0, 1.0)
 
+    # Restrict sampling to a set of disjoint windows instead, which is how a
+    # keyframe curriculum is expressed: pass KEYFRAME_WINDOWS and every episode
+    # starts at one of the four gait events rather than anywhere in the cycle.
+    # Takes precedence over phase_range when set.
+    phase_windows: Optional[Tuple[Tuple[float, float], ...]] = None
+
     # "init"    -> posture and height are measured against the frame the
     #              episode started from ("hold the pose you were dropped in")
     # "neutral" -> measured against the model's neutral standing pose
@@ -118,6 +152,16 @@ class RSIConfig:
         lo, hi = self.phase_range
         if not 0.0 <= lo < hi <= 1.0:
             raise ValueError("phase_range must satisfy 0 <= lo < hi <= 1")
+        if self.phase_windows is not None:
+            if not self.phase_windows:
+                raise ValueError("phase_windows must be non-empty when given")
+            for window in self.phase_windows:
+                wlo, whi = window
+                if not 0.0 <= wlo < whi <= 1.0:
+                    raise ValueError(
+                        "each phase window must satisfy 0 <= lo < hi <= 1, got %r"
+                        % (window,)
+                    )
 
 
 @dataclass(frozen=True)
@@ -307,15 +351,21 @@ STAGE_B = StageSpec(
         cane_target_load_fraction=0.15,
         cane_load_sigma_fraction=0.15,
     ),
-    # Same RSI setup as stage A, deliberately. Stage A learns to hold the
-    # reference's forward-leaning gait poses (tilt -0.34 to -0.55 rad); a stage B
-    # that reset upright and scored posture against an upright ideal would change
-    # the initial-state distribution, the posture reference and the reward all at
-    # once. Keeping RSI identical leaves crutch load as the single new axis.
+    # Same trajectory and posture reference as stage A, but sampling is now
+    # restricted to the four gait keyframes rather than the whole cycle. Stage A
+    # learned to hold an arbitrary pose from anywhere in the record; stage B
+    # learns to hold the specific poses the gait is built from -- one crutch
+    # forward, then the opposite leg forward, alternating sides.
+    #
+    # velocity_scale stays 0.0, so each pose arrives at rest and the task is
+    # static: stand in this configuration without falling, with the crutches
+    # taking their share of the load. Connecting the poses into motion is a
+    # later stage's job.
     rsi=RSIConfig(
         trajectory="models/reference/gaitTracking_solution_raw.sto",
         velocity_scale=0.0,
         posture_reference=INIT_FRAME,
+        phase_windows=KEYFRAME_WINDOWS,
     ),
 )
 

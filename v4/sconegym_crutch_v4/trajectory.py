@@ -61,16 +61,28 @@ class Trajectory:
         return start, max(start + 1, stop)
 
     def sample_frame(
-        self, rng, phase_range: Tuple[float, float] = (0.0, 1.0)
+        self,
+        rng,
+        phase_range: Tuple[float, float] = (0.0, 1.0),
+        phase_windows: Optional[Sequence[Tuple[float, float]]] = None,
     ) -> Tuple[int, np.ndarray, np.ndarray]:
-        """Pick a uniformly random frame inside phase_range.
+        """Pick a uniformly random frame to reset to.
 
         This is the RSI mechanism from DeepMimic: resetting to a random phase of
         the reference rather than always to its first frame, so late-phase states
         are visited from the start of training instead of only once earlier
         phases are mastered.
+
+        With `phase_windows`, sampling is restricted to a set of disjoint
+        windows -- a window is chosen uniformly, then a frame within it. That is
+        how a keyframe curriculum is expressed: give it the windows around the
+        gait events and the policy only ever starts at one of those poses.
         """
-        start, stop = self.frame_range(phase_range)
+        if phase_windows:
+            window = phase_windows[int(rng.randint(len(phase_windows)))]
+            start, stop = self.frame_range(window)
+        else:
+            start, stop = self.frame_range(phase_range)
         index = int(rng.randint(start, stop + 1)) if stop > start else start
         q, dq = self.frame(index)
         return index, q, dq

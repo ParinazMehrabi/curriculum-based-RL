@@ -406,7 +406,7 @@ class CrutchCurriculumGym(GaitGym):
             # Reference-state initialisation: drop into a random phase of the
             # reference instead of always starting from the neutral pose.
             self.rsi_frame, q, dq = self.trajectory.sample_frame(
-                self._rng, rsi.phase_range
+                self._rng, rsi.phase_range, rsi.phase_windows
             )
             dq = dq * rsi.velocity_scale
             if rsi.posture_reference == INIT_FRAME:
