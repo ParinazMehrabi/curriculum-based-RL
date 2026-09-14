@@ -26,7 +26,7 @@ import numpy as np
 from sconegym.gaitgym import GaitGym
 
 from .rewards import gaussian, smoothstep
-from .stages import INIT_FRAME, StageSpec, get_stage
+from .stages import INIT_FRAME, NEXT_KEYFRAME, StageSpec, get_stage, next_keyframe
 from .trajectory import load_sto
 
 _RSI_BANNER_SHOWN = False
@@ -203,6 +203,9 @@ class CrutchCurriculumGym(GaitGym):
         # dof order so a frame can be written straight to set_dof_positions.
         self.trajectory = None
         self.rsi_frame: Optional[int] = None
+        # (frame index, sub-movement name) the episode is moving toward, when
+        # posture_reference is "next_keyframe". None otherwise.
+        self.target_keyframe = None
         if spec.rsi is not None:
             traj_path = Path(spec.rsi.trajectory)
             if not traj_path.is_absolute():
@@ -412,11 +415,24 @@ class CrutchCurriculumGym(GaitGym):
             if rsi.posture_reference == INIT_FRAME:
                 self._posture_ref = self._frame_posture_ref(q)
                 self._height_ref_y = float(q[self._dof_index["pelvis_ty"]])
+                self.target_keyframe = None
+            elif rsi.posture_reference == NEXT_KEYFRAME:
+                # Target the following gait event rather than the one we start
+                # at: B holds the poses, C moves between them.
+                fraction = self.rsi_frame / float(self.trajectory.n_frames - 1)
+                centre, name = next_keyframe(fraction)
+                target_index = int(round(centre * (self.trajectory.n_frames - 1)))
+                target_q, _ = self.trajectory.frame(target_index)
+                self.target_keyframe = (target_index, name)
+                self._posture_ref = self._frame_posture_ref(target_q)
+                self._height_ref_y = float(target_q[self._dof_index["pelvis_ty"]])
             else:
                 self._posture_ref = self._neutral_posture_ref()
                 self._height_ref_y = self._base_pelvis_y
+                self.target_keyframe = None
         else:
             self.rsi_frame = None
+            self.target_keyframe = None
             q = self._base_q.copy()
             dq = np.zeros_like(self._base_dq)
             self._posture_ref = self._neutral_posture_ref()
@@ -452,7 +468,11 @@ class CrutchCurriculumGym(GaitGym):
         if self.init_load > 0:
             self.model.adjust_state_for_load(self.init_load)
 
-        if rsi is not None and rsi.posture_reference == INIT_FRAME:
+        if rsi is not None and rsi.posture_reference in (INIT_FRAME, NEXT_KEYFRAME):
+            # Measured from the state as it stands now. For NEXT_KEYFRAME that
+            # is still the starting geometry, which is the right baseline: the
+            # terms ask that the crutch and pelvis not fall behind where they
+            # began while the model moves to the next pose.
             self._measure_geometry_refs()
         else:
             self._lag_ref = float(spec.terms.pelvis_foot_offset_ref)

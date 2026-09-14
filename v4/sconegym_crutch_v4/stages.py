@@ -63,6 +63,52 @@ KEYFRAME_GROUPS: Tuple[Tuple[Tuple[float, float], ...], ...] = tuple(
     GAIT_KEYFRAMES[name] for name in ("crutch_r", "leg_l", "crutch_l", "leg_r")
 )
 
+# Every keyframe's midpoint, in record order, as (fraction, sub-movement). Used
+# to answer "which pose comes next" when a stage targets the following keyframe
+# rather than the one it started at. Record order already interleaves the two
+# cycles correctly: crutch_r, leg_l, crutch_l, leg_r, crutch_r, leg_l, crutch_l.
+KEYFRAME_CENTERS: Tuple[Tuple[float, str], ...] = tuple(
+    sorted(
+        ((lo + hi) / 2.0, name)
+        for name, windows in GAIT_KEYFRAMES.items()
+        for lo, hi in windows
+    )
+)
+
+
+# The same keyframes with their windows attached, in record order, so a
+# fraction can be mapped to the window it falls inside.
+_KEYFRAME_SEQUENCE: Tuple[Tuple[float, float, float, str], ...] = tuple(
+    sorted(
+        ((lo + hi) / 2.0, lo, hi, name)
+        for name, windows in GAIT_KEYFRAMES.items()
+        for lo, hi in windows
+    )
+)
+
+
+def next_keyframe(fraction: float) -> Tuple[float, str]:
+    """The keyframe that follows the one `fraction` belongs to.
+
+    A frame sampled from a window sits anywhere inside it, including before its
+    own centre. Returning "the first centre after this fraction" would then hand
+    back the window's own centre and the episode would target the pose it
+    already started in. So a fraction inside a window advances past that whole
+    window, and one in a gap takes the next centre ahead of it.
+
+    Wrapping matters for the last window: its successor is the first keyframe of
+    the following cycle, back at the start of the record.
+    """
+    n = len(_KEYFRAME_SEQUENCE)
+    for i, (centre, lo, hi, name) in enumerate(_KEYFRAME_SEQUENCE):
+        if lo - 1e-9 <= fraction <= hi + 1e-9:
+            nxt = _KEYFRAME_SEQUENCE[(i + 1) % n]
+            return nxt[0], nxt[3]
+    for centre, lo, hi, name in _KEYFRAME_SEQUENCE:
+        if centre > fraction + 1e-9:
+            return centre, name
+    return _KEYFRAME_SEQUENCE[0][0], _KEYFRAME_SEQUENCE[0][3]
+
 
 @dataclass(frozen=True)
 class TermParams:
@@ -116,7 +162,8 @@ def _check_window(window) -> None:
 
 NEUTRAL = "neutral"
 INIT_FRAME = "init"
-POSTURE_REFERENCES = (NEUTRAL, INIT_FRAME)
+NEXT_KEYFRAME = "next_keyframe"
+POSTURE_REFERENCES = (NEUTRAL, INIT_FRAME, NEXT_KEYFRAME)
 
 
 @dataclass(frozen=True)
@@ -153,10 +200,14 @@ class RSIConfig:
     # often in the record. Takes precedence over phase_windows.
     phase_window_groups: Optional[Tuple[Tuple[Tuple[float, float], ...], ...]] = None
 
-    # "init"    -> posture and height are measured against the frame the
-    #              episode started from ("hold the pose you were dropped in")
-    # "neutral" -> measured against the model's neutral standing pose
-    #              ("recover to standing from wherever you start")
+    # "init"          -> posture and height measured against the frame the
+    #                    episode started from ("hold the pose you were dropped
+    #                    in")
+    # "neutral"       -> measured against the model's neutral standing pose
+    #                    ("recover to standing from wherever you start")
+    # "next_keyframe" -> measured against the NEXT gait keyframe ("move from
+    #                    this pose to the following one"). This is the
+    #                    transition task: B holds the poses, C connects them.
     posture_reference: str = INIT_FRAME
 
     # Keep the model at the origin rather than inheriting the reference's x.
@@ -432,15 +483,20 @@ STAGE_C = StageSpec(
     initial_forward_velocity_std=0.01,
     reset_position_std=0.01,
     reset_velocity_std=0.01,
-    # Same RSI as A and B, so the initial-state distribution and posture
-    # reference carry across the transfer and velocity, backward and
-    # displacement are the only new axes. Stage B's policy is tuned for the
-    # reference's forward lean; resetting to the upright neutral pose here and
-    # scoring posture against upright would have discarded most of it.
+    # Same keyframe sampling as stage B, but posture now targets the NEXT
+    # keyframe rather than the one the episode starts at. B learned to hold the
+    # four poses; C learns the transitions between them:
+    #
+    #     crutch_r -> leg_l -> crutch_l -> leg_r -> crutch_r ...
+    #
+    # That is the single new axis. The episode still runs 1000 steps, so the
+    # task is reach the next pose and then hold it -- and holding is exactly
+    # what stage B trained, so the warm start carries.
     rsi=RSIConfig(
         trajectory="models/reference/gaitTracking_solution_raw.sto",
         velocity_scale=0.0,
-        posture_reference=INIT_FRAME,
+        posture_reference=NEXT_KEYFRAME,
+        phase_window_groups=KEYFRAME_GROUPS,
     ),
 )
 

@@ -199,19 +199,11 @@ def test_stage_b_matches_stage_a_rsi():
     assert b.phase_range == a.phase_range
 
 
-def test_stage_c_matches_the_shared_rsi():
-    a, c = stages.STAGES["A"].rsi, stages.STAGES["C"].rsi
-    assert c is not None
-    assert c.trajectory == a.trajectory
-    assert c.velocity_scale == a.velocity_scale
-    assert c.posture_reference == a.posture_reference
+def test_every_stage_uses_the_same_reference_and_rest_start():
+    """The trajectory and the at-rest start are shared across the curriculum.
 
-
-def test_every_stage_shares_the_same_rsi():
-    """All four stages must reset from the same distribution.
-
-    Each transfer is a warm start; changing the initial-state distribution or
-    the posture reference at a boundary discards what the previous stage learned.
+    What changes between stages is deliberate and one thing at a time; the
+    reference itself and velocity_scale are not among them.
     """
     base = stages.STAGES["A"].rsi
     for key in stages.STAGE_ORDER:
@@ -219,8 +211,27 @@ def test_every_stage_shares_the_same_rsi():
         assert rsi is not None, key
         assert rsi.trajectory == base.trajectory, key
         assert rsi.velocity_scale == base.velocity_scale, key
-        assert rsi.posture_reference == base.posture_reference, key
-        assert rsi.phase_range == base.phase_range, key
+
+
+def test_curriculum_progression_of_rsi():
+    """A: any pose. B: hold the keyframes. C: move between them.
+
+    Each boundary introduces exactly one change.
+    """
+    a, b, c = (stages.STAGES[k].rsi for k in "ABC")
+
+    # A -> B: sampling narrows to the keyframes; the posture target is unchanged.
+    assert a.phase_window_groups is None
+    assert b.phase_window_groups == stages.KEYFRAME_GROUPS
+    assert a.posture_reference == b.posture_reference == stages.INIT_FRAME
+
+    # B -> C: sampling is unchanged; the posture target moves to the next pose.
+    assert c.phase_window_groups == b.phase_window_groups
+    assert c.posture_reference == stages.NEXT_KEYFRAME
+
+
+def test_stage_c_targets_the_following_keyframe():
+    assert stages.STAGES["C"].rsi.posture_reference == stages.NEXT_KEYFRAME
 
 
 def test_moving_stages_loosen_hip_knee():
@@ -492,3 +503,69 @@ def test_phase_window_groups_are_overridable():
     stage = stages.STAGES["B"].with_overrides(rsi_phase_window_groups=(((0.0, 0.1),),))
     assert stage.rsi.phase_window_groups == (((0.0, 0.1),),)
     assert stages.STAGES["B"].rsi.phase_window_groups == stages.KEYFRAME_GROUPS
+
+
+# -- keyframe transitions ---------------------------------------------------
+
+
+def test_keyframe_centres_are_ordered_and_named():
+    centres = stages.KEYFRAME_CENTERS
+    assert len(centres) == 7
+    assert [f for f, _ in centres] == sorted(f for f, _ in centres)
+    for fraction, name in centres:
+        assert name in stages.GAIT_KEYFRAMES
+        assert 0.0 < fraction < 1.0
+
+
+def test_transitions_follow_the_gait_order():
+    """crutch_r -> leg_l -> crutch_l -> leg_r, repeating."""
+    expected = {
+        "crutch_r": "leg_l",
+        "leg_l": "crutch_l",
+        "crutch_l": "leg_r",
+        "leg_r": "crutch_r",
+    }
+    centres = stages.KEYFRAME_CENTERS
+    for fraction, name in centres[:-1]:
+        _, following = stages.next_keyframe(fraction)
+        assert following == expected[name], (name, following)
+
+
+def test_last_keyframe_wraps_to_the_first():
+    """Its successor lives at the start of the record, in the next cycle."""
+    last_fraction, last_name = stages.KEYFRAME_CENTERS[-1]
+    fraction, name = stages.next_keyframe(last_fraction)
+    assert fraction == stages.KEYFRAME_CENTERS[0][0]
+    assert name == stages.KEYFRAME_CENTERS[0][1]
+
+
+def test_next_keyframe_from_anywhere_in_a_window():
+    """Any frame inside a window must target the same successor."""
+    for name, windows in stages.GAIT_KEYFRAMES.items():
+        for lo, hi in windows:
+            targets = {stages.next_keyframe(f)[1] for f in (lo, (lo + hi) / 2, hi)}
+            assert len(targets) == 1, (name, lo, hi, targets)
+
+
+def test_next_keyframe_is_always_ahead():
+    for fraction, _ in stages.KEYFRAME_CENTERS[:-1]:
+        following, _ = stages.next_keyframe(fraction)
+        assert following > fraction
+
+
+def test_env_resolves_the_target_keyframe():
+    """env.py must consult next_keyframe rather than reusing the start pose."""
+    src = env_source()
+    assert "NEXT_KEYFRAME" in src
+    assert "next_keyframe(fraction)" in src
+    assert "self.target_keyframe" in src
+
+
+def test_posture_reference_accepts_three_modes():
+    assert set(stages.POSTURE_REFERENCES) == {
+        stages.NEUTRAL,
+        stages.INIT_FRAME,
+        stages.NEXT_KEYFRAME,
+    }
+    with pytest.raises(ValueError):
+        stages.RSIConfig(posture_reference="somewhere_else")

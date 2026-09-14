@@ -84,7 +84,11 @@ def main() -> int:
         indent = chr(10) + " " * 19
         print("RSI              : %s" % u.trajectory.describe().replace(chr(10), indent))
         print("  velocity_scale : %.2f" % spec.rsi.velocity_scale)
-        print("  posture ref    : %s" % spec.rsi.posture_reference)
+        print("  posture ref    : %s%s" % (
+            spec.rsi.posture_reference,
+            "  (target the FOLLOWING keyframe, not the start pose)"
+            if spec.rsi.posture_reference == "next_keyframe" else "",
+        ))
         n = u.trajectory.n_frames
         if spec.rsi.phase_window_groups:
             groups = spec.rsi.phase_window_groups
@@ -147,12 +151,15 @@ def main() -> int:
         if u.rsi_frame is not None and u.trajectory is not None:
             frac = u.rsi_frame / float(u.trajectory.n_frames - 1)
             frame_label = frame_keyframe(frac)
+        target = getattr(u, "target_keyframe", None)
+        target_txt = "-> %s@%d" % (target[1], target[0]) if target else ""
         print(
-            "reset %d: frame=%-5s %-9s com vx=%+.5f pelvis y=%.5f tilt=%+.4f hipR=%+.4f kneeR=%+.4f"
+            "reset %d: frame=%-5s %-9s %-16s com vx=%+.5f pelvis y=%.5f tilt=%+.4f hipR=%+.4f kneeR=%+.4f"
             % (
                 seed,
                 u.rsi_frame if u.rsi_frame is not None else "-",
                 frame_label,
+                target_txt,
                 u.model.com_vel().x,
                 q[u._dof_index["pelvis_ty"]],
                 q[u._dof_index["pelvis_tilt"]],

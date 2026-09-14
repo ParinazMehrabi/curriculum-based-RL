@@ -1,9 +1,17 @@
 # Stage C -- tiny forward locomotion with the crutch. Warm-starts from stage B.
 #
-# Same RSI as stages A and B (same trajectory, velocity_scale 0.0,
-# posture_reference "init"), so the initial-state distribution and posture
-# reference carry across the transfer and velocity / backward / displacement are
-# the only new axes.
+# Stage C learns the TRANSITIONS between the gait keyframes. It samples the
+# same four sub-movements as stage B, but posture now targets the NEXT keyframe
+# instead of the one the episode starts at:
+#
+#     crutch_r -> leg_l -> crutch_l -> leg_r -> crutch_r ...
+#
+# B learned to hold the four poses; C learns to move from each to the following
+# one. That is the single new axis at this boundary -- sampling, trajectory and
+# velocity_scale are all unchanged from B.
+#
+# The episode still runs 1000 steps, so the task is reach the next pose and then
+# hold it. Holding is what stage B trained, so the warm start carries.
 #
 # hip_knee_sigma is widened to 0.60 for this stage. posture measures hip and
 # knee deviation from the reference frame, and a stride moves hip flexion by
