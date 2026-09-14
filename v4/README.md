@@ -262,6 +262,43 @@ the term has gradient again. Two tests pin this: that standing still is at least
 35% worse than walking, and that the motion weights outweigh the ones rest
 satisfies.
 
+### 9. The curriculum, as it now stands
+
+The reference gait decomposes into four sub-movements, detected from the
+trajectory by `scripts/find_keyframes.py`:
+
+```
+0.53 s  frame  25  crutch_r      cycle period 3.41 s
+1.17 s  frame  55  leg_l         right crutch advances with the LEFT leg
+2.18 s  frame 102  crutch_l      left crutch advances with the RIGHT leg
+3.03 s  frame 142  leg_r
+```
+
+The four stages build on that, one change per boundary:
+
+| stage | sampling | posture target | task |
+|---|---|---|---|
+| **A** | whole cycle | start frame | balance from any pose |
+| **B** | 4 keyframes | start frame | hold each gait pose, share load with the crutch |
+| **C** | 4 keyframes | **next** keyframe | move from one pose to the next |
+| **D** | 4 keyframes | **chained** | keep advancing: walk the cycle at reference speed |
+
+Stage D advances its target every time `posture` crosses
+`chain_advance_threshold` (0.60), so one episode walks
+`crutch_r -> leg_l -> crutch_l -> leg_r -> ...` for as long as the model keeps
+arriving. `env.chain_transitions` counts how many it managed; one transition is
+stage C's entire task, so above four means a full gait cycle.
+
+The chain follows the gait **cycle**, not the record order. `leg_r` has a single
+window because its second occurrence falls past the end of the file, so walking
+the record in order would skip the right-leg step every other cycle — a limp
+rather than a gait. A test pins twenty consecutive advances against
+`CYCLE_ORDER`.
+
+`crutch_forward` and `pelvis_lag` were dropped from D. They came from the older
+posture-fix design, neither ever ran in training, and the chained pose targets
+already say where the crutches and pelvis belong.
+
 ## Setup
 
 Python 3.9, from the repository root:

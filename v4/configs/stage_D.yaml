@@ -1,52 +1,35 @@
-# Stage D -- crutch placement and trunk-over-feet correction. Warm-starts from C.
+# Stage D -- chain the sub-movements into continuous gait, at reference speed.
 #
-# Same RSI as A, B and C, and the same widened hip_knee_sigma (0.60) as C, since
-# this stage also has to stride.
+# Stage B holds the four keyframe poses, stage C moves from one to the next, and
+# stage D repeats that: each time posture crosses chain_advance_threshold (0.60)
+# the target advances to the following keyframe, so a single episode walks
 #
-# New this stage: crutch_forward (0.20), pelvis_lag (0.20) and pelvis_forward
-# (0.30), with the crutch load target lowered from 15% to 8% of body weight --
-# the model should now rely on the crutches less.
+#     crutch_r -> leg_l -> crutch_l -> leg_r -> crutch_r -> ...
 #
-# The weights were rebalanced toward moving. As first written, standing
-# perfectly still scored about 0.79/step against 0.95 for walking at target: a
-# 17% gap for behaviour that is much harder and risks the -5.0 fall penalty, so
-# standing was the rational choice. posture, backward, displacement,
-# crutch_forward and pelvis_lag are all maximised by staying put, which was 49%
-# of the weight, while only velocity (0.25) rewarded motion.
+# for as long as the model keeps arriving. env.chain_transitions counts how many
+# it managed. One transition is stage C's entire task, so anything above four
+# means a full gait cycle was walked.
 #
-# velocity is now 0.60, backward is down to 0.25 (it returns 1.0 for any v >= 0,
-# so a motionless model satisfies it perfectly), and pelvis_forward is back at
-# 0.30 as the only term that rewards distance actually covered.
+# The chain follows the gait CYCLE, not the order the windows appear in the
+# record. leg_r has a single window because its second occurrence falls past the
+# end of the file, so walking the record in order would skip the right-leg step
+# every other cycle -- a limp rather than a gait.
 #
-# target_vel is also raised from 0.03 to 0.142 m/s, the reference trajectory's
-# own mean speed, and displacement_cap from 0.5 m to 2.0 m. At 0.03 a policy
-# that perfectly satisfied the velocity term would still crawl at a fifth of the
-# gait being reproduced, and a 0.5 m cap would have penalised the 1.42 m an
-# episode at reference speed requires. Reward now climbs monotonically:
+# Speed is a consequence of chaining quickly, so velocity sits at 0.20 as a
+# tiebreaker while posture (0.45) and pelvis_forward (0.30) carry the task.
+# target_vel is the reference's own 0.142 m/s and displacement_cap is 2.0 m,
+# since a full episode at that speed covers 1.42 m.
 #
-#   v=0.000 m/s -> 0.53    v=0.100 m/s -> 0.90
-#   v=0.016 m/s -> 0.61    v=0.142 m/s -> 0.97
-#   v=0.050 m/s -> 0.75
+# crutch_forward and pelvis_lag are dropped. They came from the older
+# posture-fix design, neither ever ran in training, and the chained pose targets
+# already say where the crutches and pelvis should be.
 #
-# (0.016 m/s is what the previous stage D run actually achieved.)
-#
-# Both new terms measure deviation from offsets taken at the episode's own start
-# frame, not from the neutral pose: the pelvis-to-foot gap swings through the
-# stride, so a fixed reference would be wrong on most frames. Neither term has
-# ever been exercised in training, so watch them in the first eval.
-#
-# Stage configuration (reward weights, sigmas, reset distribution) lives in
-# sconegym_crutch_v4/stages.py, NOT in this file. v3 carried an env_args block
-# here, but nothing in the package ever read it and it was never confirmed that
-# tonic forwards it to the environment. To change a coefficient, either edit
-# stages.py or register a variant in the header, e.g.:
+# Stage configuration lives in sconegym_crutch_v4/stages.py, not in this file.
+# To change a coefficient, edit stages.py or register a variant in the header:
 #
 #   header: >
 #     import deprl, gym, sconegym, sconegym_crutch_v4;
-#     sconegym_crutch_v4.register_variant('D', 'stage_d_tuned-v1', w_posture=0.55)
-#
-# and then point `environment` at 'stage_d_tuned-v1'. Unknown override names
-# raise immediately.
+#     sconegym_crutch_v4.register_variant('D', 'stage_d_t50-v1', rsi_chain_advance_threshold=0.50)
 
 tonic:
   header: "import deprl, gym, sconegym, sconegym_crutch_v4"
@@ -74,30 +57,19 @@ tonic:
 
   test_environment: null
 
-  # Warm-start checkpoint. Fill this in with the run you actually want to
-  # continue from, as a path relative to the repository root where possible.
+  # Warm-start from stage C, which learned a single keyframe transition.
   #
-  # Two warnings:
-  #  1. v3 checkpoints are NOT loadable here. prev_action is now part of the
-  #     observation, so the observation dimension changed by +9 and the actor
-  #     input layer no longer matches. Either retrain the curriculum from
-  #     stage A, or construct with include_prev_action=False to keep the old
-  #     observation layout (and the non-Markov behaviour it causes).
-  #  2. The reward function changes at this boundary, so the critic arrives
-  #     mis-calibrated. Expect a dip. A critic warm-up or return
-  #     normalisation is the next thing worth adding here.
-  # Stage C run 260913.120005 finished 10M steps: last-10-epoch mean 634,
-  # best 717, episode_length pinned at 1000. Its step_500000 policy already had
-  # posture 0.69, crutch 0.89, zero falls.
-  #
-  # VERIFY THIS CHECKPOINT EXISTS. Stage A stopped writing checkpoints at 5.7M
-  # despite training to 10M, so the last file may be earlier than the last step.
-  # Check with:
+  # REPLACE THE PATH BELOW with your stage C run and its last checkpoint. Find
+  # both with:
   #   python scripts/eval_checkpoint.py --stage C
-  # which prints the checkpoint range, then set the number below to match.
+  # which prints the run directory and the checkpoint range it can see.
+  #
+  # Verify the load worked by watching epoch 1: a warm-started run starts near
+  # where stage C's policy scores, not near 45. Checking that one number costs
+  # nothing and catches a silently failed load before it wastes a day.
   before_training: >
     agent.load(
-      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_C_tiny_forward\260913.120005.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_10000000',
+      r'REPLACE_WITH_YOUR_STAGE_C_RUN\checkpoints\step_XXXXXXX',
       only_checkpoint=True
     )
   after_training: ''
@@ -105,16 +77,16 @@ tonic:
   checkpoint: last
   full_save: 1
 
-  name: crutch_v4_stage_D_posture_fix
+  name: crutch_v4_stage_D_chain
   resume: false
   seed: 0
   parallel: 20
   sequential: 10
 
-  # epoch_steps is the logging cadence: tonic prints a metrics table and runs
-  # a test episode at the end of every epoch. 10000 gives reward roughly every
-  # 10k environment steps. Raise it to 25000 if the test episodes cost too much
-  # wall clock; save_steps stays at 100000 so checkpoints do not multiply.
+  # epoch_steps is the logging cadence: tonic prints a metrics table and runs a
+  # test episode at the end of every epoch. 10000 gives reward roughly every 10k
+  # environment steps. Raise it to 25000 if the test episodes cost too much wall
+  # clock; save_steps stays at 100000 so checkpoints do not multiply.
   trainer: >
     deprl.custom_trainer.Trainer(
       steps=int(10000000),

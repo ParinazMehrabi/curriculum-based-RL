@@ -74,21 +74,19 @@ tonic:
   #  2. The reward function changes at this boundary, so the critic arrives
   #     mis-calibrated. Expect a dip. A critic warm-up or return
   #     normalisation is the next thing worth adding here.
-  # Stage B run 260913.094155. Its step_2400000 policy reached crutch 0.7432
-  # (up from 0.4747 zero-shot), height 0.7921, posture 0.2348, with zero falls
-  # over 10 episodes at full 1000-step length.
+  # Warm-start from stage B, which learned to HOLD the four keyframe poses.
   #
-  # UPDATE THIS to stage B's latest checkpoint before launching -- B was still
-  # training when this was written. Check what exists with:
-  #   python scripts/eval_checkpoint.py <stage-B-run-dir> --stage B
-  # which prints the checkpoint range.
+  # REPLACE THE PATH BELOW with your stage B run and its last checkpoint. Note
+  # that a stage B run from before the keyframe curriculum will not do: that one
+  # sampled the whole cycle and learned a different task. Find the run and its
+  # checkpoint range with:
+  #   python scripts/eval_checkpoint.py --stage B
   #
-  # Note the path has no .pt extension, matching what agent.load accepts; the
-  # stage A -> B transfer was verified working with this form (stage B's
-  # step_100000 evaluated byte-identically to stage A's step_5700000).
+  # Verify the load worked by watching epoch 1: a warm-started run starts near
+  # where stage B's policy scores, not near 45.
   before_training: >
     agent.load(
-      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_B_stand_crutch\260913.094155.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_2400000',
+      r'REPLACE_WITH_YOUR_STAGE_B_RUN\checkpoints\step_XXXXXXX',
       only_checkpoint=True
     )
   after_training: ''

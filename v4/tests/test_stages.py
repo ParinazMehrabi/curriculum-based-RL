@@ -110,7 +110,9 @@ def test_crutch_requirements_are_derived_from_weights():
     assert STAGES["B"].needs_crutch_force is True
     assert STAGES["B"].needs_crutch_pose is False
     assert STAGES["D"].needs_crutch_force is True
-    assert STAGES["D"].needs_crutch_pose is True
+    # crutch_forward was dropped when D became the chaining stage: the chained
+    # pose targets already specify where the crutches go.
+    assert STAGES["D"].needs_crutch_pose is False
 
 
 def test_stage_d_init_load_is_unambiguous():

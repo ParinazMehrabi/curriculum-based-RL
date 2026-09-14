@@ -460,16 +460,27 @@ def main() -> int:
         for k, v in means.items():
             term_totals[k].append(v)
         per_episode.append(
-            dict(ep=ep, frame=frame, steps=steps, score=score, fell=fell, terms=means)
+            dict(
+                ep=ep,
+                frame=frame,
+                steps=steps,
+                score=score,
+                fell=fell,
+                terms=means,
+                chain_transitions=getattr(u, "chain_transitions", None),
+            )
         )
         print(
-            "ep=%02d frame=%-5s steps=%4d score=%8.2f per_step=%.4f %s"
+            "ep=%02d frame=%-5s steps=%4d score=%8.2f per_step=%.4f %s%s"
             % (
                 ep,
                 frame if frame is not None else "-",
                 steps,
                 score,
                 score / max(steps, 1),
+                "chain=%d " % u.chain_transitions
+                if getattr(u, "chain_transitions", 0)
+                else "",
                 "FELL" if fell else "",
             )
         )
@@ -485,6 +496,12 @@ def main() -> int:
           % (scores.mean(), scores.std(), scores.min(), scores.max()))
     print("per-step reward: mean %.4f" % (scores.sum() / max(steps_all.sum(), 1)))
     print("falls          : %d of %d" % (falls, args.episodes))
+    chains = [e.get("chain_transitions") for e in per_episode]
+    if any(c for c in chains):
+        arr = np.asarray([c or 0 for c in chains], dtype=float)
+        print("chain transitions: mean %.1f  min %d  max %d"
+              % (arr.mean(), arr.min(), arr.max()))
+        print("   (1 transition is stage C's whole task; >4 is a full gait cycle)")
     print()
     print("reward terms (mean over all steps of all episodes):")
     weights = spec.reward.active_weights

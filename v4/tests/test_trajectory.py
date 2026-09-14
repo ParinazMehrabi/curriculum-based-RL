@@ -531,12 +531,30 @@ def test_transitions_follow_the_gait_order():
         assert following == expected[name], (name, following)
 
 
-def test_last_keyframe_wraps_to_the_first():
-    """Its successor lives at the start of the record, in the next cycle."""
+def test_last_keyframe_follows_the_cycle_not_the_record():
+    """The regression test for a limping chain.
+
+    The last window in the record is crutch_l. In record order its successor is
+    crutch_r back at the start, which skips leg_r -- the right-leg step would be
+    dropped every other cycle. The cycle order gives leg_r instead, and since
+    leg_r has no occurrence after that point the target wraps to its only one.
+    """
     last_fraction, last_name = stages.KEYFRAME_CENTERS[-1]
+    assert last_name == "crutch_l"
     fraction, name = stages.next_keyframe(last_fraction)
-    assert fraction == stages.KEYFRAME_CENTERS[0][0]
-    assert name == stages.KEYFRAME_CENTERS[0][1]
+    assert name == "leg_r"
+    assert fraction < last_fraction, "should wrap back to leg_r's only window"
+
+
+def test_chain_never_skips_a_sub_movement():
+    """Twenty chained advances must cycle through all four, in order."""
+    fraction, name = stages.KEYFRAME_CENTERS[0]
+    seen = [name]
+    for _ in range(20):
+        fraction, name = stages.next_keyframe(fraction)
+        seen.append(name)
+    for i, got in enumerate(seen):
+        assert got == stages.CYCLE_ORDER[i % 4], (i, seen)
 
 
 def test_next_keyframe_from_anywhere_in_a_window():
@@ -561,11 +579,83 @@ def test_env_resolves_the_target_keyframe():
     assert "self.target_keyframe" in src
 
 
-def test_posture_reference_accepts_three_modes():
+def test_posture_reference_accepts_four_modes():
     assert set(stages.POSTURE_REFERENCES) == {
         stages.NEUTRAL,
         stages.INIT_FRAME,
         stages.NEXT_KEYFRAME,
+        stages.CHAIN,
     }
     with pytest.raises(ValueError):
         stages.RSIConfig(posture_reference="somewhere_else")
+
+
+# -- stage D: chaining ------------------------------------------------------
+
+
+def test_stage_d_chains_the_keyframes():
+    rsi = stages.STAGES["D"].rsi
+    assert rsi.posture_reference == stages.CHAIN
+    assert rsi.phase_window_groups == stages.KEYFRAME_GROUPS
+
+
+def test_curriculum_posture_targets_progress():
+    """A/B hold the start pose, C reaches the next, D keeps reaching."""
+    refs = [stages.STAGES[k].rsi.posture_reference for k in "ABCD"]
+    assert refs == [
+        stages.INIT_FRAME,
+        stages.INIT_FRAME,
+        stages.NEXT_KEYFRAME,
+        stages.CHAIN,
+    ]
+
+
+def test_chain_threshold_is_validated():
+    with pytest.raises(ValueError):
+        stages.RSIConfig(chain_advance_threshold=0.0)
+    with pytest.raises(ValueError):
+        stages.RSIConfig(chain_advance_threshold=1.0)
+
+
+def test_chain_threshold_is_reachable():
+    """Above what a trained policy scores and the target can never advance.
+
+    Stage C's predecessor reached posture 0.69 on its target; the threshold must
+    sit below that or a chain episode would stall on its first target forever.
+    """
+    assert stages.STAGES["D"].rsi.chain_advance_threshold < 0.69
+
+
+def test_chaining_walks_the_cycle_in_order():
+    """Repeatedly advancing must cycle crutch_r, leg_l, crutch_l, leg_r."""
+    fraction, name = stages.KEYFRAME_CENTERS[0]
+    seen = [name]
+    for _ in range(8):
+        fraction, name = stages.next_keyframe(fraction)
+        seen.append(name)
+    expected = ["crutch_r", "leg_l", "crutch_l", "leg_r"]
+    for i, name in enumerate(seen):
+        assert name == expected[i % 4], (i, seen)
+
+
+def test_stage_d_drops_the_untrained_placement_terms():
+    """crutch_forward and pelvis_lag never ran in training and are gone."""
+    weights = stages.STAGES["D"].reward.active_weights
+    assert "crutch_forward" not in weights
+    assert "pelvis_lag" not in weights
+    for key in stages.STAGE_ORDER:
+        assert "crutch_forward" not in stages.STAGES[key].reward.active_weights, key
+
+
+def test_env_implements_chain_advance():
+    src = env_source()
+    assert "_advance_chain_if_arrived" in src
+    assert "chain_advance_threshold" in src
+    assert "self.chain_transitions" in src
+
+
+def test_velocity_is_a_tiebreaker_in_stage_d():
+    """Speed should follow from chaining, not compete with it."""
+    w = stages.STAGES["D"].reward.active_weights
+    assert w["velocity"] < w["posture"]
+    assert w["velocity"] < w["pelvis_forward"]

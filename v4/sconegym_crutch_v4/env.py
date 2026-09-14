@@ -26,7 +26,14 @@ import numpy as np
 from sconegym.gaitgym import GaitGym
 
 from .rewards import gaussian, smoothstep
-from .stages import INIT_FRAME, NEXT_KEYFRAME, StageSpec, get_stage, next_keyframe
+from .stages import (
+    CHAIN,
+    INIT_FRAME,
+    NEXT_KEYFRAME,
+    StageSpec,
+    get_stage,
+    next_keyframe,
+)
 from .trajectory import load_sto
 
 _RSI_BANNER_SHOWN = False
@@ -203,9 +210,13 @@ class CrutchCurriculumGym(GaitGym):
         # dof order so a frame can be written straight to set_dof_positions.
         self.trajectory = None
         self.rsi_frame: Optional[int] = None
-        # (frame index, sub-movement name) the episode is moving toward, when
-        # posture_reference is "next_keyframe". None otherwise.
+        # (frame index, sub-movement name) the episode is moving toward, for the
+        # "next_keyframe" and "chain" posture references. None otherwise.
         self.target_keyframe = None
+        # How many targets a "chain" episode has reached. The headline metric
+        # for stage D: one transition is stage C's whole task, so anything above
+        # about four means a full gait cycle was walked.
+        self.chain_transitions: int = 0
         if spec.rsi is not None:
             traj_path = Path(spec.rsi.trajectory)
             if not traj_path.is_absolute():
@@ -397,6 +408,7 @@ class CrutchCurriculumGym(GaitGym):
         self.fall_time = -1.0
         self.prev_action[:] = 0.0
         self.current_action[:] = 0.0
+        self.chain_transitions = 0
         # Zero the values, never the keys. See the note in __init__.
         for key in self.rwd_dict:
             self.rwd_dict[key] = 0.0
@@ -416,16 +428,13 @@ class CrutchCurriculumGym(GaitGym):
                 self._posture_ref = self._frame_posture_ref(q)
                 self._height_ref_y = float(q[self._dof_index["pelvis_ty"]])
                 self.target_keyframe = None
-            elif rsi.posture_reference == NEXT_KEYFRAME:
+            elif rsi.posture_reference in (NEXT_KEYFRAME, CHAIN):
                 # Target the following gait event rather than the one we start
                 # at: B holds the poses, C moves between them.
                 fraction = self.rsi_frame / float(self.trajectory.n_frames - 1)
                 centre, name = next_keyframe(fraction)
                 target_index = int(round(centre * (self.trajectory.n_frames - 1)))
-                target_q, _ = self.trajectory.frame(target_index)
-                self.target_keyframe = (target_index, name)
-                self._posture_ref = self._frame_posture_ref(target_q)
-                self._height_ref_y = float(target_q[self._dof_index["pelvis_ty"]])
+                self._set_keyframe_target(target_index, name)
             else:
                 self._posture_ref = self._neutral_posture_ref()
                 self._height_ref_y = self._base_pelvis_y
@@ -511,6 +520,33 @@ class CrutchCurriculumGym(GaitGym):
                 continue
         if cane_xs:
             self._crutch_ref = float(min(cane_xs) - pelvis_x)
+
+    def _set_keyframe_target(self, index: int, name: str) -> None:
+        """Point posture and height at a specific reference frame."""
+        target_q, _ = self.trajectory.frame(index)
+        self.target_keyframe = (int(index), name)
+        self._posture_ref = self._frame_posture_ref(target_q)
+        self._height_ref_y = float(target_q[self._dof_index["pelvis_ty"]])
+
+    def _advance_chain_if_arrived(self, posture_value: float) -> None:
+        """Move the target to the following keyframe once this one is reached.
+
+        This is what turns stage C's single transition into continuous gait: the
+        episode keeps handing the policy the next pose for as long as it keeps
+        arriving, so one episode walks the cycle rather than one step of it.
+        """
+        rsi = self.stage_spec.rsi
+        if rsi is None or rsi.posture_reference != CHAIN:
+            return
+        if self.target_keyframe is None or self.trajectory is None:
+            return
+        if posture_value < rsi.chain_advance_threshold:
+            return
+        n = self.trajectory.n_frames
+        fraction = self.target_keyframe[0] / float(n - 1)
+        centre, name = next_keyframe(fraction)
+        self._set_keyframe_target(int(round(centre * (n - 1))), name)
+        self.chain_transitions += 1
 
     def _rate_limit(self, action) -> np.ndarray:
         action = np.asarray(action, dtype=np.float32)
@@ -739,6 +775,7 @@ class CrutchCurriculumGym(GaitGym):
         self.reward_breakdown = breakdown
         for key in self.rwd_dict:
             self.rwd_dict[key] = float(breakdown.get(key, 0.0))
+        self._advance_chain_if_arrived(self.term_values.get("posture", 0.0))
         spec = self.stage_spec.reward
         self.shaping_value = (
             (total - spec.alive) / spec.shaping_scale if spec.shaping_scale > 0 else 0.0

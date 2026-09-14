@@ -76,8 +76,18 @@ KEYFRAME_CENTERS: Tuple[Tuple[float, str], ...] = tuple(
 )
 
 
-# The same keyframes with their windows attached, in record order, so a
-# fraction can be mapped to the window it falls inside.
+# The canonical order of the gait cycle. The chain follows THIS, not the order
+# the windows happen to appear in the record.
+#
+# That distinction matters: leg_r has a single window because its second
+# occurrence falls past the end of the file. Walking the record in order would
+# give crutch_r, leg_l, crutch_l, leg_r, crutch_r, leg_l, crutch_l and then wrap
+# straight back to crutch_r, silently skipping the right-leg step every other
+# cycle -- a limp, not a gait.
+CYCLE_ORDER: Tuple[str, ...] = ("crutch_r", "leg_l", "crutch_l", "leg_r")
+
+# Keyframes with their windows attached, in record order, so a fraction can be
+# mapped to the window it falls inside.
 _KEYFRAME_SEQUENCE: Tuple[Tuple[float, float, float, str], ...] = tuple(
     sorted(
         ((lo + hi) / 2.0, lo, hi, name)
@@ -87,27 +97,29 @@ _KEYFRAME_SEQUENCE: Tuple[Tuple[float, float, float, str], ...] = tuple(
 )
 
 
-def next_keyframe(fraction: float) -> Tuple[float, str]:
-    """The keyframe that follows the one `fraction` belongs to.
-
-    A frame sampled from a window sits anywhere inside it, including before its
-    own centre. Returning "the first centre after this fraction" would then hand
-    back the window's own centre and the episode would target the pose it
-    already started in. So a fraction inside a window advances past that whole
-    window, and one in a gap takes the next centre ahead of it.
-
-    Wrapping matters for the last window: its successor is the first keyframe of
-    the following cycle, back at the start of the record.
-    """
-    n = len(_KEYFRAME_SEQUENCE)
-    for i, (centre, lo, hi, name) in enumerate(_KEYFRAME_SEQUENCE):
-        if lo - 1e-9 <= fraction <= hi + 1e-9:
-            nxt = _KEYFRAME_SEQUENCE[(i + 1) % n]
-            return nxt[0], nxt[3]
+def _sub_movement_at(fraction: float) -> str:
+    """Which sub-movement `fraction` belongs to, or the most recent one behind it."""
     for centre, lo, hi, name in _KEYFRAME_SEQUENCE:
-        if centre > fraction + 1e-9:
-            return centre, name
-    return _KEYFRAME_SEQUENCE[0][0], _KEYFRAME_SEQUENCE[0][3]
+        if lo - 1e-9 <= fraction <= hi + 1e-9:
+            return name
+    behind = [entry for entry in _KEYFRAME_SEQUENCE if entry[0] <= fraction]
+    return behind[-1][3] if behind else _KEYFRAME_SEQUENCE[-1][3]
+
+
+def next_keyframe(fraction: float) -> Tuple[float, str]:
+    """The keyframe that follows `fraction` in the gait cycle.
+
+    The sub-movement is decided by CYCLE_ORDER, so the sequence is always
+    crutch_r, leg_l, crutch_l, leg_r regardless of how many windows each has in
+    the record. The frame returned is that sub-movement's next occurrence after
+    `fraction`, wrapping to its first when there is none -- so targets stay
+    local to where the model is whenever the record allows.
+    """
+    current = _sub_movement_at(fraction)
+    following = CYCLE_ORDER[(CYCLE_ORDER.index(current) + 1) % len(CYCLE_ORDER)]
+    centres = sorted((lo + hi) / 2.0 for lo, hi in GAIT_KEYFRAMES[following])
+    ahead = [c for c in centres if c > fraction + 1e-9]
+    return (ahead[0] if ahead else centres[0]), following
 
 
 @dataclass(frozen=True)
@@ -163,7 +175,8 @@ def _check_window(window) -> None:
 NEUTRAL = "neutral"
 INIT_FRAME = "init"
 NEXT_KEYFRAME = "next_keyframe"
-POSTURE_REFERENCES = (NEUTRAL, INIT_FRAME, NEXT_KEYFRAME)
+CHAIN = "chain"
+POSTURE_REFERENCES = (NEUTRAL, INIT_FRAME, NEXT_KEYFRAME, CHAIN)
 
 
 @dataclass(frozen=True)
@@ -208,7 +221,18 @@ class RSIConfig:
     # "next_keyframe" -> measured against the NEXT gait keyframe ("move from
     #                    this pose to the following one"). This is the
     #                    transition task: B holds the poses, C connects them.
+    # "chain"         -> like next_keyframe, but the target ADVANCES to the
+    #                    following keyframe each time the model arrives, so one
+    #                    episode walks the whole cycle instead of one step of
+    #                    it. This is the stage that wires the sub-movements into
+    #                    continuous gait.
     posture_reference: str = INIT_FRAME
+
+    # Posture value at which a "chain" episode counts the target as reached and
+    # advances to the next keyframe. Too high and the model can never advance;
+    # too low and it skips ahead without really arriving. 0.60 is roughly what a
+    # trained stage C policy reaches on its target pose.
+    chain_advance_threshold: float = 0.60
 
     # Keep the model at the origin rather than inheriting the reference's x.
     zero_travel: bool = True
@@ -216,6 +240,8 @@ class RSIConfig:
     def __post_init__(self):
         if not 0.0 <= self.velocity_scale <= 1.0:
             raise ValueError("velocity_scale must lie in [0, 1]")
+        if not 0.0 < self.chain_advance_threshold < 1.0:
+            raise ValueError("chain_advance_threshold must lie in (0, 1)")
         if self.posture_reference not in POSTURE_REFERENCES:
             raise ValueError(
                 "posture_reference must be one of %r, got %r"
@@ -503,86 +529,69 @@ STAGE_C = StageSpec(
 # ---------------------------------------------------------------------------
 # Stage D: crutch placement and trunk-over-feet correction.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Stage D: chain the sub-movements into continuous gait, at reference speed.
+#
+# Stage B holds the four keyframe poses, stage C moves from one to the next, and
+# stage D repeats that: each time the model arrives at its target the target
+# advances to the following keyframe, so a single episode walks
+#
+#     crutch_r -> leg_l -> crutch_l -> leg_r -> crutch_r -> ...
+#
+# for as long as it can keep going. Speed is a consequence of chaining quickly
+# rather than a separate objective, so velocity sits at a low weight as a
+# tiebreaker and pelvis_forward rewards the distance that results.
+#
+# crutch_forward and pelvis_lag are dropped. They were from the older
+# "posture fix" design, neither has ever run in training, and the chained pose
+# targets already specify where the crutches and pelvis should be.
+# ---------------------------------------------------------------------------
 STAGE_D = StageSpec(
-    name="D-posture-fix",
+    name="D-chain",
     reward=_spec(
         alive=0.15,
         weights={
-            "height": 0.20,
+            # Reaching the current target pose is the task.
             "posture": 0.45,
-            "crutch": 0.15,
-            "crutch_forward": 0.20,
-            # Raised from 0.25. With 8 terms the geometric mean gave velocity an
-            # exponent of only 0.128, so standing perfectly still scored about
-            # 0.79/step against 0.95 for walking at target -- a 17% gap for
-            # behaviour that is far harder and risks the -5.0 fall penalty.
-            # Standing was the rational choice.
-            "velocity": 0.60,
-            # Lowered from 0.45. backward returns 1.0 for any v >= 0, so a
-            # motionless model satisfies it perfectly; weighting it second
-            # highest was paying the policy to stay put.
-            "backward": 0.25,
-            "displacement": 0.05,
-            # Re-added at 0.30. This is clip(travel/cap, 0, 1), the only term
-            # that rewards distance actually covered. It was dropped when it
-            # measured a flat 0.0 -- but that was under zero torque, where the
-            # model drifts backward. Stage C travels forward, so the term now
-            # has gradient and its removal had left velocity as the sole
-            # incentive to move.
+            # Distance covered, which is what chaining produces.
             "pelvis_forward": 0.30,
-            "pelvis_lag": 0.20,
+            "backward": 0.25,
+            "height": 0.20,
+            # A tiebreaker toward reference cadence, not a driver: the model
+            # moves because it is chasing pose targets, not because of this.
+            "velocity": 0.20,
+            "crutch": 0.15,
+            "displacement": 0.05,
         },
         fall_penalty=5.0,
     ),
     terms=TermParams(
         pelvis_tilt_sigma=0.15,
         lumbar_sigma=0.18,
-        # Widened from 0.35 for the same reason as stage C: this stage moves,
-        # and at 0.35 the 0.45-weighted posture term scores about 0.05 for any
-        # real stride, opposing velocity. Widening it in C took posture from
-        # 0.23 to 0.69, the single biggest gain in the curriculum so far.
+        # As in stage C: this stage strides, and the standing value of 0.35
+        # would make posture score about 0.05 for any real step.
         hip_knee_sigma=0.60,
         height_drop_sigma=0.18,
         cane_target_load_fraction=0.08,
-        # Widened from 0.15 to match stage C. With the tighter value the 8%
-        # target scored at most 0.22 across a whole episode, against 0.97 in
-        # stage C -- unloading the crutch is the goal, but it has to be
-        # reachable from where stage C leaves the policy.
         cane_load_sigma_fraction=0.25,
         velocity_sigma_fraction=0.7,
-        # Raised from 0.5 m. At the reference speed the model covers 1.42 m in a
-        # 1000-step episode, so a 0.5 m cap would penalise exactly the behaviour
-        # this stage exists to produce, and pelvis_forward would saturate at 1.0
-        # after 3.5 s and stop giving gradient.
+        # A full episode at reference speed covers 1.42 m, so the stage C cap of
+        # 0.5 m would penalise exactly what this stage exists to produce.
         displacement_cap=2.0,
     ),
-    # Reference speed, not stage C's 0.03 stepping stone. At target_vel=0.03 a
-    # policy that perfectly satisfied the velocity term would still be crawling
-    # at a fifth of the gait being reproduced. The run that prompted this change
-    # travelled 15.8 cm in 10 s, about 11% of reference.
     target_vel=REFERENCE_SPEED,
-    # Stage C resets with a small forward push and reached velocity=0.99; stage D
-    # inherited C's 0.03 m/s target but reset from a standstill, so velocity
-    # never exceeded 0.043. Match C so the target is reachable at step 1.
-    # Start near the target rather than near zero, so the velocity term is not
-    # already close to a total loss at step 1.
     initial_forward_velocity=0.10,
     initial_forward_velocity_std=0.02,
     reset_position_std=0.01,
     reset_velocity_std=0.01,
     # v3's stage D config declared init_load twice (0.5 then 0.4); the second
-    # silently won. Resolved here to 0.5 to match stages A-C. Override in YAML
-    # if 0.4 was in fact intended.
+    # silently won. Resolved here to 0.5 to match stages A-C.
     init_load=0.5,
-    # Same RSI as A, B and C. crutch_forward and pelvis_lag now measure against
-    # offsets taken from the episode's own start frame rather than the neutral
-    # pose: the pelvis-to-foot gap swings through the stride, so a fixed 0.101 m
-    # reference would be wrong for most frames -- the same class of mistake that
-    # left both terms pinned when they were measured against zero.
     rsi=RSIConfig(
         trajectory="models/reference/gaitTracking_solution_raw.sto",
         velocity_scale=0.0,
-        posture_reference=INIT_FRAME,
+        posture_reference=CHAIN,
+        phase_window_groups=KEYFRAME_GROUPS,
     ),
 )
 
