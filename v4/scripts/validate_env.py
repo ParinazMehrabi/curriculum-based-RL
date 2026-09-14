@@ -31,6 +31,24 @@ import sconegym  # noqa: F401  (registers the base envs)
 import sconegym_crutch_v4 as scv4
 
 
+def keyframe_label(lo: float, hi: float) -> str:
+    """Name the gait sub-movement a window corresponds to."""
+    for name, windows in scv4.GAIT_KEYFRAMES.items():
+        for wlo, whi in windows:
+            if abs(wlo - lo) < 1e-6 and abs(whi - hi) < 1e-6:
+                return name
+    return "?"
+
+
+def frame_keyframe(frac: float) -> str:
+    """Name the sub-movement a sampled frame fell in, with a small tolerance."""
+    for name, windows in scv4.GAIT_KEYFRAMES.items():
+        for lo, hi in windows:
+            if lo - 0.005 <= frac <= hi + 0.005:
+                return name
+    return "(gap)"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="A", help="A, B, C or D")
@@ -66,8 +84,18 @@ def main() -> int:
         indent = chr(10) + " " * 19
         print("RSI              : %s" % u.trajectory.describe().replace(chr(10), indent))
         print("  velocity_scale : %.2f" % spec.rsi.velocity_scale)
-        print("  phase_range    : %s" % (spec.rsi.phase_range,))
         print("  posture ref    : %s" % spec.rsi.posture_reference)
+        n = u.trajectory.n_frames
+        if spec.rsi.phase_windows:
+            print("  sampling       : %d keyframe windows (phase_range ignored)"
+                  % len(spec.rsi.phase_windows))
+            for lo, hi in spec.rsi.phase_windows:
+                label = keyframe_label(lo, hi)
+                print("      %.4f-%.4f  frames %3d-%3d  %s"
+                      % (lo, hi, int(lo * (n - 1)), int(hi * (n - 1)) + 1, label))
+        else:
+            print("  sampling       : whole cycle, phase_range %s"
+                  % (spec.rsi.phase_range,))
     else:
         print("RSI              : disabled (resets to the neutral pose)")
     print()
@@ -103,11 +131,16 @@ def main() -> int:
         q = np.asarray(u.model.dof_position_array(), dtype=float)
         dq = np.asarray(u.model.dof_velocity_array(), dtype=float)
         states.append(np.concatenate([q, dq]))
+        frame_label = ""
+        if u.rsi_frame is not None and u.trajectory is not None:
+            frac = u.rsi_frame / float(u.trajectory.n_frames - 1)
+            frame_label = frame_keyframe(frac)
         print(
-            "reset %d: frame=%-5s com vx=%+.5f pelvis y=%.5f tilt=%+.4f hipR=%+.4f kneeR=%+.4f"
+            "reset %d: frame=%-5s %-9s com vx=%+.5f pelvis y=%.5f tilt=%+.4f hipR=%+.4f kneeR=%+.4f"
             % (
                 seed,
                 u.rsi_frame if u.rsi_frame is not None else "-",
+                frame_label,
                 u.model.com_vel().x,
                 q[u._dof_index["pelvis_ty"]],
                 q[u._dof_index["pelvis_tilt"]],

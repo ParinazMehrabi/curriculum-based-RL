@@ -12,8 +12,11 @@ from gym.envs.registration import register
 
 from .rewards import RewardSpec, gaussian, smoothstep
 from .stages import (
+    GAIT_KEYFRAMES,
     INIT_FRAME,
+    KEYFRAME_WINDOWS,
     NEUTRAL,
+    REFERENCE_SPEED,
     RSIConfig,
     STAGE_ORDER,
     STAGES,
@@ -25,6 +28,9 @@ from .trajectory import Trajectory, load_sto, summarise
 
 __all__ = [
     "ENV_IDS",
+    "GAIT_KEYFRAMES",
+    "KEYFRAME_WINDOWS",
+    "REFERENCE_SPEED",
     "RSIConfig",
     "RewardSpec",
     "Trajectory",
