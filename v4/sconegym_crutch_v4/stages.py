@@ -20,6 +20,13 @@ CRUTCH_FORCE_TERMS = ("crutch",)
 # Terms that need crutch body positions.
 CRUTCH_POSE_TERMS = ("crutch_forward",)
 
+# Mean forward speed of models/reference/gaitTracking_solution_raw.sto in m/s,
+# from its pelvis_tx speed column. This is the gait the curriculum is trying to
+# reproduce. Stage C's 0.03 is a deliberate stepping stone; stage D asks for the
+# real thing. Re-measure if the reference changes:
+#   python -c "import sys; sys.path.insert(0,'.'); from sconegym_crutch_v4.trajectory import load_sto; t=load_sto('../models/reference/gaitTracking_solution_raw.sto',['pelvis_tx']); print(t.dq[:,0].mean())"
+REFERENCE_SPEED = 0.142
+
 
 @dataclass(frozen=True)
 class TermParams:
@@ -413,14 +420,24 @@ STAGE_D = StageSpec(
         # reachable from where stage C leaves the policy.
         cane_load_sigma_fraction=0.25,
         velocity_sigma_fraction=0.7,
-        displacement_cap=0.5,
+        # Raised from 0.5 m. At the reference speed the model covers 1.42 m in a
+        # 1000-step episode, so a 0.5 m cap would penalise exactly the behaviour
+        # this stage exists to produce, and pelvis_forward would saturate at 1.0
+        # after 3.5 s and stop giving gradient.
+        displacement_cap=2.0,
     ),
-    target_vel=0.03,
+    # Reference speed, not stage C's 0.03 stepping stone. At target_vel=0.03 a
+    # policy that perfectly satisfied the velocity term would still be crawling
+    # at a fifth of the gait being reproduced. The run that prompted this change
+    # travelled 15.8 cm in 10 s, about 11% of reference.
+    target_vel=REFERENCE_SPEED,
     # Stage C resets with a small forward push and reached velocity=0.99; stage D
     # inherited C's 0.03 m/s target but reset from a standstill, so velocity
     # never exceeded 0.043. Match C so the target is reachable at step 1.
-    initial_forward_velocity=0.02,
-    initial_forward_velocity_std=0.01,
+    # Start near the target rather than near zero, so the velocity term is not
+    # already close to a total loss at step 1.
+    initial_forward_velocity=0.10,
+    initial_forward_velocity_std=0.02,
     reset_position_std=0.01,
     reset_velocity_std=0.01,
     # v3's stage D config declared init_load twice (0.5 then 0.4); the second

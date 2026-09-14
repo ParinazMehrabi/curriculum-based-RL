@@ -16,8 +16,19 @@
 #
 # velocity is now 0.60, backward is down to 0.25 (it returns 1.0 for any v >= 0,
 # so a motionless model satisfies it perfectly), and pelvis_forward is back at
-# 0.30 as the only term that rewards distance actually covered. Standing still
-# now scores about 0.53 against 1.00 for walking -- a 47% gap.
+# 0.30 as the only term that rewards distance actually covered.
+#
+# target_vel is also raised from 0.03 to 0.142 m/s, the reference trajectory's
+# own mean speed, and displacement_cap from 0.5 m to 2.0 m. At 0.03 a policy
+# that perfectly satisfied the velocity term would still crawl at a fifth of the
+# gait being reproduced, and a 0.5 m cap would have penalised the 1.42 m an
+# episode at reference speed requires. Reward now climbs monotonically:
+#
+#   v=0.000 m/s -> 0.53    v=0.100 m/s -> 0.90
+#   v=0.016 m/s -> 0.61    v=0.142 m/s -> 0.97
+#   v=0.050 m/s -> 0.75
+#
+# (0.016 m/s is what the previous stage D run actually achieved.)
 #
 # Both new terms measure deviation from offsets taken at the episode's own start
 # frame, not from the neutral pose: the pelvis-to-foot gap swings through the

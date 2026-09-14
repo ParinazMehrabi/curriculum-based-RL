@@ -428,3 +428,49 @@ def test_every_stage_term_is_either_pinned_or_deliberately_excluded():
     for key, stage in STAGES.items():
         for term in stage.reward.active_weights:
             assert term in pinned or term in excluded, (key, term)
+
+
+def test_stage_d_targets_the_reference_speed():
+    """The curriculum has to ask for the gait it is reproducing.
+
+    With target_vel=0.03 a policy that perfectly satisfied the velocity term
+    would still crawl at a fifth of the reference, and displacement_cap=0.5 m
+    would penalise covering the 1.42 m an episode at reference speed requires.
+    """
+    d = STAGES["D"]
+    assert d.target_vel == pytest.approx(stages.REFERENCE_SPEED)
+    assert d.terms.displacement_cap >= d.target_vel * 10.0
+
+
+def test_stage_c_stays_a_stepping_stone():
+    """C is deliberately slow; only D asks for reference speed."""
+    assert STAGES["C"].target_vel < STAGES["D"].target_vel
+    assert STAGES["C"].target_vel == pytest.approx(0.03)
+
+
+def test_reward_climbs_monotonically_with_speed_in_stage_d():
+    """There must be gradient all the way from standing to reference speed.
+
+    The run that prompted this moved at 0.016 m/s; if the reward is flat between
+    there and target, nothing pulls the policy forward.
+    """
+    d = STAGES["D"]
+    spec = d.reward
+
+    def score(v):
+        terms = {t: 1.0 for t in spec.required_terms}
+        terms["velocity"] = rewards.gaussian(v - d.target_vel, d.velocity_sigma)
+        terms["pelvis_forward"] = min(1.0, (v * 10.0) / d.terms.displacement_cap)
+        return spec.compose(terms)[0]
+
+    speeds = [0.0, 0.016, 0.05, 0.10, d.target_vel]
+    scores = [score(v) for v in speeds]
+    assert all(b > a for a, b in zip(scores, scores[1:])), scores
+    # The observed 0.016 m/s must be clearly worse than reference speed.
+    assert (scores[-1] - scores[1]) / scores[-1] > 0.3
+
+
+def test_stage_d_starts_near_its_target():
+    """Resetting near zero would make velocity a near-total loss at step 1."""
+    d = STAGES["D"]
+    assert d.initial_forward_velocity > 0.5 * d.target_vel
