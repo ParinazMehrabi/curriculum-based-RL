@@ -55,6 +55,14 @@ KEYFRAME_WINDOWS: Tuple[Tuple[float, float], ...] = tuple(
     sorted(w for windows in GAIT_KEYFRAMES.values() for w in windows)
 )
 
+# The same windows grouped by sub-movement, so each of the four gets an equal
+# share of episodes. Sampling KEYFRAME_WINDOWS uniformly would not: leg_r has
+# one window against two for the others, because its second occurrence falls
+# past the end of the record, so it would be trained half as often.
+KEYFRAME_GROUPS: Tuple[Tuple[Tuple[float, float], ...], ...] = tuple(
+    GAIT_KEYFRAMES[name] for name in ("crutch_r", "leg_l", "crutch_l", "leg_r")
+)
+
 
 @dataclass(frozen=True)
 class TermParams:
@@ -98,6 +106,14 @@ class TermParams:
     crutch_offset_ref: float = 0.052
 
 
+def _check_window(window) -> None:
+    lo, hi = window
+    if not 0.0 <= lo < hi <= 1.0:
+        raise ValueError(
+            "each phase window must satisfy 0 <= lo < hi <= 1, got %r" % (window,)
+        )
+
+
 NEUTRAL = "neutral"
 INIT_FRAME = "init"
 POSTURE_REFERENCES = (NEUTRAL, INIT_FRAME)
@@ -127,10 +143,15 @@ class RSIConfig:
     phase_range: Tuple[float, float] = (0.0, 1.0)
 
     # Restrict sampling to a set of disjoint windows instead, which is how a
-    # keyframe curriculum is expressed: pass KEYFRAME_WINDOWS and every episode
-    # starts at one of the four gait events rather than anywhere in the cycle.
-    # Takes precedence over phase_range when set.
+    # keyframe curriculum is expressed: every episode starts at one of the gait
+    # events rather than anywhere in the cycle. Takes precedence over
+    # phase_range when set.
     phase_windows: Optional[Tuple[Tuple[float, float], ...]] = None
+
+    # Windows grouped by sub-movement. The group is sampled uniformly first, so
+    # each sub-movement gets an equal share even when they recur unequally
+    # often in the record. Takes precedence over phase_windows.
+    phase_window_groups: Optional[Tuple[Tuple[Tuple[float, float], ...], ...]] = None
 
     # "init"    -> posture and height are measured against the frame the
     #              episode started from ("hold the pose you were dropped in")
@@ -156,12 +177,15 @@ class RSIConfig:
             if not self.phase_windows:
                 raise ValueError("phase_windows must be non-empty when given")
             for window in self.phase_windows:
-                wlo, whi = window
-                if not 0.0 <= wlo < whi <= 1.0:
-                    raise ValueError(
-                        "each phase window must satisfy 0 <= lo < hi <= 1, got %r"
-                        % (window,)
-                    )
+                _check_window(window)
+        if self.phase_window_groups is not None:
+            if not self.phase_window_groups:
+                raise ValueError("phase_window_groups must be non-empty when given")
+            for group in self.phase_window_groups:
+                if not group:
+                    raise ValueError("each phase window group must be non-empty")
+                for window in group:
+                    _check_window(window)
 
 
 @dataclass(frozen=True)
@@ -365,7 +389,7 @@ STAGE_B = StageSpec(
         trajectory="models/reference/gaitTracking_solution_raw.sto",
         velocity_scale=0.0,
         posture_reference=INIT_FRAME,
-        phase_windows=KEYFRAME_WINDOWS,
+        phase_window_groups=KEYFRAME_GROUPS,
     ),
 )
 

@@ -65,6 +65,7 @@ class Trajectory:
         rng,
         phase_range: Tuple[float, float] = (0.0, 1.0),
         phase_windows: Optional[Sequence[Tuple[float, float]]] = None,
+        phase_window_groups: Optional[Sequence[Sequence[Tuple[float, float]]]] = None,
     ) -> Tuple[int, np.ndarray, np.ndarray]:
         """Pick a uniformly random frame to reset to.
 
@@ -77,8 +78,19 @@ class Trajectory:
         windows -- a window is chosen uniformly, then a frame within it. That is
         how a keyframe curriculum is expressed: give it the windows around the
         gait events and the policy only ever starts at one of those poses.
+
+        `phase_window_groups` goes one level further and samples the *group*
+        uniformly first. That matters when the events do not recur equally often
+        in the record: the reference holds two cycles but its last right-leg
+        event falls past the end, so leg_r has one window where the others have
+        two. Sampling windows uniformly would train that pose half as much.
+        Grouping by sub-movement gives each an equal share.
         """
-        if phase_windows:
+        if phase_window_groups:
+            group = phase_window_groups[int(rng.randint(len(phase_window_groups)))]
+            window = group[int(rng.randint(len(group)))]
+            start, stop = self.frame_range(window)
+        elif phase_windows:
             window = phase_windows[int(rng.randint(len(phase_windows)))]
             start, stop = self.frame_range(window)
         else:

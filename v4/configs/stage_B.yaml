@@ -12,7 +12,12 @@
 #     4.61 s  frame 216  leg_l
 #     5.67 s  frame 266  crutch_l
 #
-# Seven windows, half-width 0.15 s. Stage A learned to hold an arbitrary pose
+# Seven windows, half-width 0.15 s, grouped into the four sub-movements and
+# sampled one sub-movement at a time. leg_r has a single window where the others
+# have two, because its second occurrence falls past the end of the record;
+# sampling windows uniformly would have trained that pose half as often.
+#
+# Stage A learned to hold an arbitrary pose
 # from anywhere in the cycle; stage B learns to hold the specific poses the gait
 # is built from. velocity_scale stays 0.0, so each pose arrives at rest and the
 # task is static -- stand in this configuration without falling, with the

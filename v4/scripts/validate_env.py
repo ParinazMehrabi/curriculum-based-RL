@@ -86,7 +86,19 @@ def main() -> int:
         print("  velocity_scale : %.2f" % spec.rsi.velocity_scale)
         print("  posture ref    : %s" % spec.rsi.posture_reference)
         n = u.trajectory.n_frames
-        if spec.rsi.phase_windows:
+        if spec.rsi.phase_window_groups:
+            groups = spec.rsi.phase_window_groups
+            print("  sampling       : %d sub-movements, each equally likely"
+                  % len(groups))
+            for group in groups:
+                label = keyframe_label(*group[0])
+                spans = " ".join(
+                    "%3d-%3d" % (int(lo * (n - 1)), int(hi * (n - 1)) + 1)
+                    for lo, hi in group
+                )
+                print("      %-9s %d window(s)  frames %s"
+                      % (label, len(group), spans))
+        elif spec.rsi.phase_windows:
             print("  sampling       : %d keyframe windows (phase_range ignored)"
                   % len(spec.rsi.phase_windows))
             for lo, hi in spec.rsi.phase_windows:

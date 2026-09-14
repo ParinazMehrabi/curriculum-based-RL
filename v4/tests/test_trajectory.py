@@ -368,8 +368,71 @@ def test_keyframes_follow_the_contralateral_order():
 
 def test_stage_b_samples_only_the_keyframes():
     rsi = stages.STAGES["B"].rsi
-    assert rsi.phase_windows == stages.KEYFRAME_WINDOWS
+    assert rsi.phase_window_groups == stages.KEYFRAME_GROUPS
     assert rsi.velocity_scale == 0.0, "the keyframe task is static"
+
+
+def test_keyframe_groups_cover_every_window():
+    flat = tuple(sorted(w for g in stages.KEYFRAME_GROUPS for w in g))
+    assert flat == stages.KEYFRAME_WINDOWS
+    assert len(stages.KEYFRAME_GROUPS) == 4
+
+
+def test_sub_movements_are_sampled_equally():
+    """leg_r has one window where the others have two.
+
+    Sampling windows uniformly would give it half the episodes; grouping by
+    sub-movement first gives each of the four an equal share.
+    """
+    traj = _synthetic(n=301)
+    rng = np.random.RandomState(0)
+    counts = {name: 0 for name in stages.GAIT_KEYFRAMES}
+    draws = 4000
+    for _ in range(draws):
+        idx, _, _ = traj.sample_frame(rng, phase_window_groups=stages.KEYFRAME_GROUPS)
+        frac = idx / (traj.n_frames - 1)
+        for name, windows in stages.GAIT_KEYFRAMES.items():
+            if any(lo - 0.01 <= frac <= hi + 0.01 for lo, hi in windows):
+                counts[name] += 1
+                break
+    assert sum(counts.values()) == draws
+    for name, count in counts.items():
+        share = count / draws
+        assert 0.20 < share < 0.30, (name, share, counts)
+
+
+def test_flat_window_sampling_is_unbalanced():
+    """Documents why groups exist: the flat form under-samples leg_r."""
+    traj = _synthetic(n=301)
+    rng = np.random.RandomState(0)
+    leg_r = 0
+    draws = 4000
+    for _ in range(draws):
+        idx, _, _ = traj.sample_frame(rng, phase_windows=stages.KEYFRAME_WINDOWS)
+        frac = idx / (traj.n_frames - 1)
+        if any(lo - 0.01 <= frac <= hi + 0.01 for lo, hi in stages.GAIT_KEYFRAMES["leg_r"]):
+            leg_r += 1
+    assert 0.11 < leg_r / draws < 0.18, leg_r / draws
+
+
+def test_groups_take_precedence_over_windows():
+    traj = _synthetic(n=301)
+    rng = np.random.RandomState(3)
+    idx, _, _ = traj.sample_frame(
+        rng,
+        phase_windows=((0.9, 1.0),),
+        phase_window_groups=(((0.0, 0.05),),),
+    )
+    assert idx <= 16
+
+
+def test_rsi_rejects_bad_phase_window_groups():
+    with pytest.raises(ValueError):
+        stages.RSIConfig(phase_window_groups=())
+    with pytest.raises(ValueError):
+        stages.RSIConfig(phase_window_groups=((),))
+    with pytest.raises(ValueError):
+        stages.RSIConfig(phase_window_groups=(((0.5, 0.4),),))
 
 
 def test_stage_a_still_samples_the_whole_cycle():
@@ -422,4 +485,10 @@ def test_rsi_rejects_bad_phase_windows():
 def test_phase_windows_are_overridable():
     stage = stages.STAGES["B"].with_overrides(rsi_phase_windows=((0.0, 0.1),))
     assert stage.rsi.phase_windows == ((0.0, 0.1),)
-    assert stages.STAGES["B"].rsi.phase_windows == stages.KEYFRAME_WINDOWS
+    assert stages.STAGES["B"].rsi.phase_windows is None
+
+
+def test_phase_window_groups_are_overridable():
+    stage = stages.STAGES["B"].with_overrides(rsi_phase_window_groups=(((0.0, 0.1),),))
+    assert stage.rsi.phase_window_groups == (((0.0, 0.1),),)
+    assert stages.STAGES["B"].rsi.phase_window_groups == stages.KEYFRAME_GROUPS
