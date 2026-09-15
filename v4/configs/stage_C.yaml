@@ -74,19 +74,32 @@ tonic:
   #  2. The reward function changes at this boundary, so the critic arrives
   #     mis-calibrated. Expect a dip. A critic warm-up or return
   #     normalisation is the next thing worth adding here.
-  # Warm-start from stage B, which learned to HOLD the four keyframe poses.
+  # Warm-start from stage B run 260914.192317, 10M steps, all 100 checkpoints
+  # written. Its step_10000000 policy evaluated at:
   #
-  # REPLACE THE PATH BELOW with your stage B run and its last checkpoint. Note
-  # that a stage B run from before the keyframe curriculum will not do: that one
-  # sampled the whole cycle and learned a different task. Find the run and its
-  # checkpoint range with:
-  #   python scripts/eval_checkpoint.py --stage B
+  #     posture 0.1725   crutch 0.6763   height 0.8387
+  #     1000 steps every episode, 0 falls in 10, crutch load 24.5% BW
+  #
+  # The crutch and height terms transferred well and the policy is stable. But
+  # posture -- B's actual task, holding the pose it was dropped into -- came out
+  # at 0.17, and the per-episode spread tracks the sub-movement: crutch_l scored
+  # 702 while leg_r scored 368. The leg-forward keyframes have a limb mid-swing
+  # with one foot barely loaded, so they are not statically stable and "hold
+  # this pose" asks for something the dynamics will not permit.
+  #
+  # Stage C may therefore be BETTER posed than B: it asks the model to move to
+  # the next pose, which is what the dynamics want to do anyway. That is the
+  # assumption this run tests. If C's first eval also shows posture near 0.17,
+  # the pose targets are simply too tight for this model and the fix is widening
+  # pelvis_tilt_sigma / lumbar_sigma from 0.15 / 0.15:
+  #
+  #   python -c "import sconegym_crutch_v4 as s; s.register_variant('C','stage_c_wide-v1',pelvis_tilt_sigma=0.25,lumbar_sigma=0.25)"
   #
   # Verify the load worked by watching epoch 1: a warm-started run starts near
   # where stage B's policy scores, not near 45.
   before_training: >
     agent.load(
-      r'REPLACE_WITH_YOUR_STAGE_B_RUN\checkpoints\step_XXXXXXX',
+      r'C:\Users\FUM Care\Documents\SCONE\results\crutch_v4_stage_B_stand_crutch\260914.192317.Rajagopal2015_crutch_2D_ankles_locked_mesh_lumbar\checkpoints\step_10000000',
       only_checkpoint=True
     )
   after_training: ''
