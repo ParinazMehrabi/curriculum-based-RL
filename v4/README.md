@@ -10,6 +10,9 @@ v4/
     rewards.py    reward primitives + composition (no simulator dependency)
     stages.py     the four stages, as data
     env.py        the single environment class
+    backends.py   picks Hyfydy or MuJoCo (CRUTCH_V4_BACKEND)
+    mujoco_backend.py   sconepy-shaped model API over MuJoCo
+    mujoco_gym.py       GaitGym's plumbing over that model
     __init__.py   registration + variant helper
   configs/        tonic configs, one per stage
   notebooks/
@@ -18,9 +21,14 @@ v4/
   scripts/
     run_stages.py     rollout + plotting logic (the notebook calls this)
     reward_report.py  reward structure + safety analysis (numpy only)
-    validate_env.py   environment smoke test (needs sconegym + Hyfydy)
-  tests/          55 tests, runnable without gym or sconegym
+    validate_env.py   environment smoke test (either backend)
+    hfd_to_mjcf.py    .hfd -> MJCF translator (regenerates the MuJoCo model)
+    validate_mujoco.py  checks the MJCF against the .hfd (no licence needed)
+  tests/          175 tests, runnable without gym or sconegym
 ```
+
+`models/mjcf/rajagopal_crutch_2d.xml` is generated, not written by hand. See
+section 10.
 
 ## What changed and why
 
@@ -299,6 +307,139 @@ rather than a gait. A test pins twenty consecutive advances against
 posture-fix design, neither ever ran in training, and the chained pose targets
 already say where the crutches and pelvis belong.
 
+### 10. MuJoCo as a second physics backend
+
+The curriculum now runs on either Hyfydy or MuJoCo. `models/mjcf/rajagopal_crutch_2d.xml`
+is generated from the same `.hfd` by `v4/scripts/hfd_to_mjcf.py`, and
+`CrutchCurriculumGym` picks its base class at import time:
+
+```bash
+CRUTCH_V4_BACKEND=mujoco  python -m deprl.main v4/configs/stage_A.yaml
+CRUTCH_V4_BACKEND=scone   python v4/scripts/validate_env.py --stage A
+# default is `auto`: scone when sconegym is installed, mujoco otherwise
+```
+
+The reward maths, the stages, RSI and the keyframe chain are untouched -- they
+only ever spoke to the simulator through about twenty calls on `self.model`,
+and `mujoco_backend.MujocoModel` implements that same surface. The whole change
+to `env.py` is three lines.
+
+The point is that **the MuJoCo path needs no Hyfydy licence and no sconegym**,
+so the curriculum, not just the reward arithmetic, runs on an ordinary machine.
+It is also roughly 3-6k steps/s single-threaded here.
+
+#### What is exact
+
+The `.hfd` is a readable declarative file, so most of the translation is
+mechanical and lossless: masses, inertias, joint anchors, joint ranges, motor
+torque limits and all six contact spheres copy across unchanged, and
+`validate_mujoco.py` checks them against the `.hfd` on every run.
+
+The MJCF **keeps OpenSim's frame** -- X forward, Y up, Z to the subject's right
+-- rather than converting to MuJoCo's usual Z-up, with gravity set to -Y. That
+is what makes the translation exact: every sign and axis copies verbatim, hip
+flexion stays positive-forward, knee flexion stays negative, `_vec_x` still
+means forward and `_vec_y` still means height, and the Moco reference
+trajectory can be written straight into `qpos`. The only cost is that MuJoCo's
+free camera assumes Z-up, so use the model's `side` camera.
+
+The one measurement of Hyfydy available without a licence is the zero-torque
+collapse the calibration section above records. It matches:
+
+| | MuJoCo | Hyfydy |
+|---|---|---|
+| COM height at rest | 0.933 | 0.922 |
+| COM height after 36 steps | 0.877 | 0.858 |
+| step at which it falls | 83 | 73 |
+
+A test and `validate_mujoco.py` both pin this, because a wrong mass, a flipped
+gravity axis or a badly scaled contact would all change the collapse rate.
+
+#### What is not exact, and why
+
+Four departures, each reported by the converter when it applies them:
+
+- **Locked joints become rigid welds.** `ankle_r/l` and `mtp_r/l` have
+  `limits 0..0`, so they are emitted as jointless bodies rather than zero-width
+  hinges the solver would police every step. All 16 dofs still exist in the
+  backend's table -- the four locked ones read as constant 0 -- so `N_DOF` and
+  `LOCKED_DOFS` indexing in `env.py` are unchanged.
+- **Two inertia tensors are rebalanced.** MuJoCo requires `A+B>=C`;
+  `forearm_r/l` (0.010, 0.002, 0.021) and `toes_r/l` (0.0001, 0.0002, 0.0010)
+  violate it. The two smaller components are scaled up until the tensor is
+  valid, leaving the largest -- `I_z`, the sagittal axis and the only one that
+  carries dynamics in a planar model -- exactly as written. The correction is
+  dynamically inert.
+- **Meshes become capsules.** The `.vtp`/`.STL` assets are not in this
+  repository. The stand-in geoms are visual only (`contype=0 conaffinity=0`)
+  and cannot affect physics; all contact geometry is explicit in the `.hfd`.
+- **Contact compliance is not matched.** Hyfydy's material (stiffness 11006.4,
+  damping 1) and MuJoCo's constraint solver are different models with no exact
+  correspondence. Friction carries over as the static coefficient 0.9. Expect
+  sim-to-sim differences here before anywhere else.
+
+That last one has a consequence worth knowing, because it changes what
+`init_load` means. MuJoCo resolves contact with a constraint solver rather than
+a penalty spring, so the normal force does not rise continuously from zero with
+penetration: **the instant a contact becomes active it already carries a finite
+load.** How much depends on the pose -- on how much of the body that first
+contact has to arrest -- and on this model it runs from about **0.20 to 0.73 of
+body weight** across reset poses (0.40 from the neutral `.zml` pose).
+
+So the shipped `init_load = 0.5` is reachable from some reset poses and not
+others. When it is not, `adjust_state_for_load` settles the model at the
+shallowest real contact rather than leaving it hovering -- the impact transient
+stays out of the episode either way -- and warns once per environment.
+
+It is not a tuning artefact. Widening `solref`'s time constant from 0.005 to
+0.08 moves the neutral-pose floor only from 0.445 to 0.362, while taking foot
+penetration from 0.04 mm to 21 mm, so the stiff setting is kept for the shallow
+penetration and the floor is accepted. Under Hyfydy's compliant contact there
+is no floor and `init_load` means exactly what it says; under MuJoCo it means
+"settle into contact, bearing at least this much where the pose allows".
+
+Joint limits *are* matched: the `.hfd`'s `joint_limit_stiffness = 500` becomes
+a soft `solreflimit`, rather than MuJoCo's near-rigid default. That matters
+more than it looks -- see the next section.
+
+#### Checkpoints do not transfer between backends
+
+sconegym's 2D observation layout lives inside sconegym, which the MuJoCo
+backend does not depend on and which is not installed on every machine that
+will run it. Rather than guess at the layout and be subtly wrong,
+`MujocoGaitGym` defines its own, documented in `OBS_LAYOUT` and pinned by a
+test: 30 values plus `prev_action`, against the SCONE backend's 39.
+
+So the actor's input layer will not load across backends. This is the same
+consequence the v3 -> v4 transition had, for the same reason. Pick one backend
+for a whole curriculum run.
+
+### 11. The reference trajectory violates the model's joint limits
+
+Not a MuJoCo issue -- both backends read the same pair of files -- but the port
+surfaced it, because MuJoCo enforces joint ranges where the `.hfd`'s were
+previously just declarations. `validate_mujoco.py` reports it:
+
+| dof | limit | reference range | frames outside | worst |
+|---|---|---|---|---|
+| `hip_flexion_r` | -0.698 .. 0.698 | +0.281 .. +0.886 | 69 / 301 | 0.188 rad |
+| `knee_angle_r` | -2.094 .. 0.087 | +0.121 .. +0.616 | **301 / 301** | 0.528 rad |
+| `hip_flexion_l` | -0.698 .. 0.698 | +0.243 .. +0.862 | 34 / 301 | 0.164 rad |
+| `knee_angle_l` | -2.094 .. 0.087 | +0.003 .. +0.676 | 184 / 301 | 0.589 rad |
+
+The knees are the striking case. The reference is **positive on every frame**,
+which is Rajagopal2015's convention (positive `knee_angle` = flexion), while
+this model's range is `-120..5` degrees, the classic OpenSim convention
+(negative = flexion). The two disagree about the sign of knee flexion, so
+**every RSI reset hyperextends the knee instead of flexing it**, and then the
+joint limit pushes back for the rest of the episode.
+
+This is worth resolving before reading much into any stage's posture term, and
+it is a plausible contributor to the near-zero posture values stages A and B
+report. Nothing in this pass changes it: flipping the sign redefines what the
+whole curriculum is imitating and would invalidate the existing runs. That is
+a decision about the model, not about the port.
+
 ## Setup
 
 Python 3.9, from the repository root:
@@ -315,6 +456,17 @@ pip install -e "E:\Pooria\SCONE crane\Sconegym\sconegym"
 automatically. Loading a `.hfd` model additionally needs an **active Hyfydy
 licence**; without one, `sconepy.load_model` raises before any v4 code runs.
 
+If you have no SCONE install, skip both of those and use the MuJoCo backend
+instead -- `pip install -r requirements.txt` already brings in `mujoco`:
+
+```powershell
+$env:CRUTCH_V4_BACKEND = "mujoco"
+python v4/scripts/validate_mujoco.py
+```
+
+`auto`, the default, picks this for you when sconegym is not installed.
+Section 10 covers what is and is not identical between the two.
+
 Do not upgrade `gym`. The working environment uses a pre-0.22 release with the
 old `registry.make(id, **kwargs)` API, and sconegym depends on it.
 
@@ -325,9 +477,15 @@ dependency:
 
 | works without Hyfydy | needs Hyfydy |
 |---|---|
-| `pytest tests` (55 tests) | `scripts/validate_env.py` |
-| `scripts/reward_report.py` | `scripts/run_stages.py` |
-| notebook sections 1, 2, 7 | notebook sections 3-6 |
+| `pytest tests` (175 tests) | nothing, if you use the MuJoCo backend |
+| `scripts/reward_report.py` | |
+| `scripts/validate_mujoco.py` | |
+| everything else, under `CRUTCH_V4_BACKEND=mujoco` | |
+
+Since the MuJoCo backend landed this table is mostly historical: with `pip
+install mujoco` the whole curriculum -- training included -- runs without a
+licence. What still needs Hyfydy is reproducing the *existing* checkpoints,
+which were trained against it and do not transfer (see section 10).
 
 ## Running it
 
@@ -338,9 +496,14 @@ python scripts/reward_report.py
 # Tests. Needs numpy + pytest, no gym or sconegym.
 python -m pytest tests -q
 
-# Environment smoke test. Needs sconegym + Hyfydy.
+# Environment smoke test. Runs on whichever backend is selected.
 python scripts/validate_env.py --stage A
 python scripts/validate_env.py --stage D --steps 400
+
+# Regenerate the MuJoCo model from the .hfd, then check it against that .hfd.
+# Neither needs sconegym or a Hyfydy licence.
+python scripts/hfd_to_mjcf.py
+python scripts/validate_mujoco.py
 
 # Measure the neutral pose: crutch load as a fraction of body weight, and the
 # pelvis-to-foot / pelvis-to-crutch offsets the lag terms reference.

@@ -26,7 +26,11 @@ if str(REPO_V4) not in sys.path:
 import numpy as np
 
 import gym
-import sconegym  # noqa: F401  (registers the base envs)
+# sconegym is only needed by the scone backend; ensure_simulator imports it
+# when that backend is selected and does nothing under mujoco.
+from sconegym_crutch_v4.backends import ensure_simulator
+
+BACKEND = ensure_simulator()
 
 import sconegym_crutch_v4 as scv4
 

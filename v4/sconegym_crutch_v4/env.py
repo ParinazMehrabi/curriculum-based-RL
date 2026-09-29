@@ -23,8 +23,8 @@ from typing import Dict, List, Optional, Sequence
 
 import gym
 import numpy as np
-from sconegym.gaitgym import GaitGym
 
+from .backends import resolve as resolve_backend
 from .rewards import gaussian, smoothstep
 from .stages import (
     CHAIN,
@@ -51,7 +51,11 @@ CANE_BODY_NAMES = ("Crutch_r", "Crutch_l")
 FOOT_BODY_NAMES = ("calcn_r", "calcn_l")
 PELVIS_BODY_NAME = "pelvis"
 
-DEFAULT_MODEL = "Rajagopal_crutch_v3_A0_walk_003.scone"
+# Which simulator this class sits on, chosen at import time. See backends.py;
+# set CRUTCH_V4_BACKEND to pick one explicitly. Everything below this line is
+# simulator-agnostic -- the curriculum only ever touches the small model API
+# that both backends implement.
+_BASE, DEFAULT_MODEL_FILE, BACKEND = resolve_backend()
 
 # The exact key set v3 put in `info`, in v3's order.
 #
@@ -78,7 +82,7 @@ V3_INFO_KEYS = (
 )
 
 
-class CrutchCurriculumGym(GaitGym):
+class CrutchCurriculumGym(_BASE):
     """Torque-actuated 2D Rajagopal model with welded crutches."""
 
     ACTUATOR_NAMES = (
@@ -143,11 +147,10 @@ class CrutchCurriculumGym(GaitGym):
             raise ValueError("torque_scales must have shape (%d,)" % self.N_ACT)
 
         if model_file is None:
-            model_file = str(
-                Path(__file__).resolve().parents[2] / "models" / "scone" / DEFAULT_MODEL
-            )
+            model_file = str(DEFAULT_MODEL_FILE)
         if not Path(model_file).is_file():
             raise FileNotFoundError("model file not found: %s" % model_file)
+        self.backend = BACKEND
 
         spec = self.stage_spec
         super().__init__(

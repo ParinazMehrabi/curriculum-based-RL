@@ -155,7 +155,9 @@ def rollout(
 
     try:
         import gym
-        import sconegym  # noqa: F401
+        from sconegym_crutch_v4.backends import ensure_simulator
+
+        ensure_simulator()
         import sconegym_crutch_v4 as scv4
     except ImportError as exc:
         out.update(

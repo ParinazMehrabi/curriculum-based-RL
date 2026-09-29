@@ -26,6 +26,18 @@ tensorboard
 # custom_trainer, all referenced from the stage configs.
 deprl
 
+# --- physics backend -------------------------------------------------------
+# The MuJoCo backend (CRUTCH_V4_BACKEND=mujoco) runs the whole curriculum
+# against models/mjcf/rajagopal_crutch_2d.xml, generated from the same .hfd by
+# v4/scripts/hfd_to_mjcf.py. It needs no Hyfydy licence and no sconegym, so it
+# is the one path that works on a machine without the SCONE install.
+#
+# Optional if you only ever use the scone backend. The upper bound is
+# conservative rather than forced: 3.2.7 is what the backend was written and
+# validated against. Newer releases install on Python 3.9 too, so raise it once
+# you have run `python v4/scripts/validate_mujoco.py` against the new version.
+mujoco>=3.1,<3.3
+
 # --- plots and notebook ----------------------------------------------------
 matplotlib>=3.5,<4
 jupyterlab>=3.4
