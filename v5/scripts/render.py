@@ -38,18 +38,32 @@ def make_camera(env, distance=2.4, azimuth=110.0, elevation=-6.0):
 
 
 def still(env, width, height):
-    """Four views of the reset pose."""
+    """Views of the reset stance, including a close-up of the foot contacts."""
     env.reset(seed=0)
     renderer = mujoco.Renderer(env.model, height=height, width=width)
+    options = mujoco.MjvOption()
+    options.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
     cam = make_camera(env)
-    frames = []
-    labels = []
+    frames, labels = [], []
     # The model faces ~109 degrees, so offset the azimuths from that to get
     # recognisable front / side / back views rather than arbitrary ones.
     facing = np.degrees(env._heading_ref)
-    for offset, label in ((0, "front"), (90, "side"), (180, "back"), (45, "three-quarter")):
-        cam.azimuth = facing + offset
-        renderer.update_scene(env.data, camera=cam)
+    views = (
+        (0, 0.95, 2.4, -6, "front"),
+        (90, 0.95, 2.4, -6, "side"),
+        (180, 0.95, 2.4, -6, "back"),
+        # Close on the feet: the orange discs are contact points, and they sit
+        # under the heel as well as the forefoot. Before the stance solve the
+        # model started on its toes with both heels 23 mm off the floor.
+        (90, 0.10, 0.75, -12, "foot contacts"),
+    )
+    for azimuth, look_z, distance, elevation, label in views:
+        cam.lookat[:] = env.data.subtree_com[0]
+        cam.lookat[2] = look_z
+        cam.distance = distance
+        cam.azimuth = facing + azimuth
+        cam.elevation = elevation
+        renderer.update_scene(env.data, camera=cam, scene_option=options)
         frames.append(renderer.render())
         labels.append(label)
     renderer.close()
@@ -91,7 +105,7 @@ def compose(frames, labels, title, subtitle, footer, out: Path):
     BG, FG, MUTED = "#14161a", "#e8eaed", "#9aa0a6"
     n = len(frames)
     fig = plt.figure(figsize=(3.6 * n, 7.4), facecolor=BG)
-    gs = fig.add_gridspec(1, n, wspace=0.02, top=0.845, bottom=0.135,
+    gs = fig.add_gridspec(1, n, wspace=0.02, top=0.845, bottom=0.215,
                           left=0.015, right=0.985)
     for i, (img, label) in enumerate(zip(frames, labels)):
         ax = fig.add_subplot(gs[0, i])
@@ -102,7 +116,7 @@ def compose(frames, labels, title, subtitle, footer, out: Path):
         ax.set_title(label, color=FG, fontsize=12, pad=9)
     fig.suptitle(title, color=FG, fontsize=17, y=0.955, fontweight="bold")
     fig.text(0.5, 0.895, subtitle, color=MUTED, fontsize=10.5, ha="center")
-    fig.text(0.5, 0.055, footer, color=MUTED, fontsize=10.5, ha="center",
+    fig.text(0.5, 0.095, footer, color=MUTED, fontsize=10.5, ha="center",
              linespacing=1.9, family="monospace")
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=112, facecolor=BG)
@@ -134,9 +148,12 @@ def main(argv=None) -> int:
     footer = (
         "%d bodies · %d qpos · %d Hill-type muscles · %d activation states · %.1f kg\n"
         "17 independent joints; 29 more follow equality constraints (knee rolling contact, lumbar distribution)\n"
-        "observation %d dims, of which %d are muscle activation — the state the policy cannot infer otherwise"
+        "reset stance solved plantigrade to %.0e m, COM over the base of support\n"
+        "contact load   heel_R %.2f   toe_R %.2f   heel_L %.2f   toe_L %.2f   (body weight)"
         % (env.model.nbody, env.model.nq, env.n_muscle, env.model.na,
-           env.body_weight / 9.81, env.observation_space.shape[0], env.model.na)
+           env.body_weight / 9.81,
+           max(env.stance_residual, env.seat_residual),
+           *env.contact_loads())
     )
     out = args.out or DEFAULT_OUT
     if args.mode == "rollout":

@@ -118,6 +118,43 @@ def main(argv=None) -> int:
         fwd, lat = env.planar_velocity()
         r.note("planar velocity at reset", "forward %+.3f  lateral %+.3f m/s" % (fwd, lat))
 
+        section("2b. standing stance and foot contact")
+        print("  The model used to start up on its toes with both heels 23 mm")
+        print("  in the air, because the shipped keyframe is a mid-stride pose.")
+        print()
+        r.check(env.stance_residual < 1e-4, "stance solve converged",
+                "residual %.1e" % env.stance_residual)
+        worst_heel, worst_toe, loads, totals = 0.0, 0.0, [], []
+        for seed in range(12):
+            env.reset(seed=seed)
+            for foot in ("calcn_r", "calcn_l"):
+                worst_heel = max(worst_heel, abs(env._heel_z(foot)))
+                worst_toe = max(worst_toe, abs(env._toe_z(foot)))
+            loads.append(env.heel_contact_loads())
+            totals.append(env.contact_loads().sum())
+        loads = np.asarray(loads)
+        r.check(worst_heel < 1e-4, "both heels on the floor, every reset",
+                "worst gap %.2e m over 12 resets" % worst_heel)
+        r.check(worst_toe < 1e-4, "both toes on the floor, every reset",
+                "worst gap %.2e m" % worst_toe)
+        r.check(0.7 < min(totals) and max(totals) < 1.6,
+                "reset is in static equilibrium",
+                "total load %.2f .. %.2f BW" % (min(totals), max(totals)))
+        env.reset(seed=0)
+        offset = np.asarray(env.data.subtree_com[0])[:2] - env._support_centroid()[:2]
+        r.check(np.abs(offset).max() < 5e-3, "COM over the base of support",
+                "offset %.2e m" % np.abs(offset).max())
+        # A heel resting at z=0 with zero force is still contact; the split
+        # between heel and toe is the solver's to make in an indeterminate
+        # stance, so this is reported rather than asserted.
+        r.note("heels carrying load",
+               "%d of 12 resets have both heels loaded (%.2f..%.2f BW)"
+               % (int((loads > 0.01).all(axis=1).sum()), loads.min(), loads.max()))
+        env.reset(seed=0)
+        L = env.contact_loads()
+        r.note("load split at reset",
+               "heel_R %.2f  toe_R %.2f  heel_L %.2f  toe_L %.2f BW" % tuple(L))
+
         section("3. reward safety")
         report = env.stage_spec.reward.termination_report(gamma=0.99)
         r.check(

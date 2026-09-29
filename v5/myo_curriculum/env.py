@@ -73,6 +73,23 @@ INDEPENDENT_JOINTS: Tuple[str, ...] = (
 )
 
 FOOT_BODIES = ("calcn_r", "calcn_l")
+
+# Contact geometry, split fore/aft. The rear group sits on the calcn, the
+# forward group on the toes; `r_foot_col3` is the rearmost and is what has to
+# touch for the stance to be plantigrade rather than up on the forefoot.
+#
+# Heel and toe loads are reported separately because the difference between
+# them *is* gait phase -- heel strike, midstance, toe-off -- and a single
+# per-foot total throws that away.
+HEEL_GEOMS = {
+    "calcn_r": ("r_foot_col1", "r_foot_col3", "r_foot_col4"),
+    "calcn_l": ("l_foot_col1", "l_foot_col3", "l_foot_col4"),
+}
+TOE_GEOMS = {
+    "calcn_r": ("r_bofoot_col1", "r_bofoot_col2"),
+    "calcn_l": ("l_bofoot_col1", "l_bofoot_col2"),
+}
+
 PELVIS_BODY = "pelvis"
 TORSO_BODY = "torso"
 HEAD_BODY = "head"
@@ -148,8 +165,8 @@ class MyoLocomotionEnv(gym.Env):
         self.n_act = int(self.model.nu)
         self.prev_action = np.zeros(self.n_act, dtype=np.float32)
 
-        self._resolve_indices()
         self._validate_model()
+        self._resolve_indices()
 
         self.body_weight = float(self.model.body_mass.sum()) * GRAVITY
 
@@ -161,7 +178,9 @@ class MyoLocomotionEnv(gym.Env):
         # Settle the model once so height and posture are measured against a
         # pose the physics actually supports, rather than against the keyframe,
         # whose toes penetrate the floor by about a centimetre.
-        self._neutral_qpos, self._neutral_height = self._measure_neutral()
+        self.stance_residual = float("nan")
+        self.seat_residual = float("nan")
+        self._neutral_qpos, self._neutral_height = self._solve_stance_pose()
 
         self.render_mode = render_mode
         self._renderer = None
@@ -236,6 +255,19 @@ class MyoLocomotionEnv(gym.Env):
             )
 
         # Geoms belonging to each foot subtree, for per-foot contact force.
+        # Geom ids per load group, ordered heel_r, toe_r, heel_l, toe_l to
+        # match contact_loads().
+        self._load_groups: List[set] = []
+        for foot in FOOT_BODIES:
+            for table in (HEEL_GEOMS, TOE_GEOMS):
+                ids = set()
+                for gname in table[foot]:
+                    g = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, gname)
+                    if g < 0:
+                        raise RuntimeError("contact geom %r not found" % gname)
+                    ids.add(g)
+                self._load_groups.append(ids)
+
         self.foot_geoms: List[set] = []
         for bid in self.foot_ids:
             ids = set()
@@ -278,22 +310,254 @@ class MyoLocomotionEnv(gym.Env):
             )
         self.n_muscle = n_muscle
 
-    def _measure_neutral(self) -> Tuple[np.ndarray, float]:
-        """Settle the model under a small activation and record where it rests.
+    # -- the standing stance ----------------------------------------------
 
-        The shipped keyframe has the left toes 1.1 cm through the floor, so
-        using it directly as the height reference would bake that in. Dropping
-        the model and letting contact resolve gives a pose the physics agrees
-        with.
+    # Joints the stance solve may move, against the residuals it drives to
+    # zero: four foot heights, two COM-over-base offsets and two
+    # trunk-verticality components, with pelvis height, root pitch and root
+    # roll as three further unknowns.
+    _STANCE_VARS = (
+        "hip_flexion_r", "knee_angle_r", "ankle_angle_r",
+        "hip_flexion_l", "knee_angle_l", "ankle_angle_l",
+        "flex_extension", "lat_bending",
+    )
+    _STANCE_ZERO = (
+        "hip_adduction_r", "hip_adduction_l", "hip_rotation_r", "hip_rotation_l",
+        "subtalar_angle_r", "subtalar_angle_l", "mtp_angle_r", "mtp_angle_l",
+        "axial_rotation",
+    )
+
+    def _support_centroid(self) -> np.ndarray:
+        """Horizontal centre of the base of support.
+
+        The mean of the four contact groups' geom positions -- heel and toe of
+        each foot -- rather than the midpoint of the two calcn bodies. The
+        calcn COM sits forward of the foot's true support area, so balancing
+        the body COM over it left the model pitching onto its toes and
+        unloading both heels within four steps.
         """
-        mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
-        self.data.act[:] = self.stage_spec.initial_activation
-        self.data.ctrl[:] = self.stage_spec.initial_activation
-        for _ in range(100):
-            mujoco.mj_step(self.model, self.data)
-        qpos = self.data.qpos.copy()
-        height = float(self.data.xipos[self.pelvis_id][2])
-        return qpos, height
+        pts = []
+        for group in self._load_groups:
+            for g in group:
+                pts.append(np.asarray(self.data.geom_xpos[g]))
+        return np.mean(pts, axis=0)
+
+    def _geom_lowest_z(self, name: str) -> float:
+        """World z of the lowest point of a contact geom."""
+        g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        if g < 0:
+            raise RuntimeError("contact geom %r not found" % name)
+        size = self.model.geom_size[g]
+        radius = (
+            float(size.min())
+            if self.model.geom_type[g] == mujoco.mjtGeom.mjGEOM_ELLIPSOID
+            else float(size[0])
+        )
+        return float(self.data.geom_xpos[g][2] - radius)
+
+    def _heel_z(self, foot: str) -> float:
+        return min(self._geom_lowest_z(n) for n in HEEL_GEOMS[foot])
+
+    def _toe_z(self, foot: str) -> float:
+        return min(self._geom_lowest_z(n) for n in TOE_GEOMS[foot])
+
+    _SEAT_VARS = (
+        "hip_flexion_r", "knee_angle_r", "ankle_angle_r",
+        "hip_flexion_l", "knee_angle_l", "ankle_angle_l",
+    )
+
+    def _seat_feet(self, iterations: int = 60) -> None:
+        """Put both heels and both toes back on the floor after randomisation.
+
+        Reset perturbs the independent joints, which breaks the stance solve in
+        two ways: tilting a foot about its ankle lifts the heel (0.02 rad moves
+        a 0.2 m foot by 4 mm), and perturbing a hip or knee changes that leg's
+        length and lifts the whole foot, by up to 30 mm in practice.
+
+        Solving each leg on its own is not enough. The knee's lower limit is
+        full extension, so once a leg is straight it cannot lengthen further,
+        and the per-leg Newton stalls a millimetre or two short however many
+        iterations it is given. The pelvis has to move too.
+
+        So this shares the stance solve's unknowns -- six leg angles plus
+        pelvis height and a root pitch/roll delta -- against six residuals:
+        four foot heights and the two horizontal offsets of the COM from the
+        base of support. Nine unknowns, six constraints, solved least-norm, so
+        the seating disturbs the randomised pose as little as it can while
+        guaranteeing the model starts balanced with both feet flat.
+
+        The trunk joints keep whatever randomisation gave them; what it cannot
+        do is take a foot off the ground or put the COM outside the base, which
+        for a standing reset are the right constraints.
+        """
+        m, d = self.model, self.data
+        adr, lim = [], []
+        for joint in self._SEAT_VARS:
+            jid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, joint)
+            adr.append(int(m.jnt_qposadr[jid]))
+            lim.append(m.jnt_range[jid])
+        n_var = len(self._SEAT_VARS)
+        lo_b = np.array([l[0] for l in lim])
+        hi_b = np.array([l[1] for l in lim])
+        base_quat = d.qpos[3:7].copy()
+
+        def residual(x):
+            for a, v, (lo, hi) in zip(adr, x[:n_var], lim):
+                d.qpos[a] = float(np.clip(v, lo, hi))
+            d.qpos[2] = x[n_var]
+            q = base_quat.copy()
+            for angle, axis in (
+                (x[n_var + 1], (0.0, 1.0, 0.0)),
+                (x[n_var + 2], (1.0, 0.0, 0.0)),
+            ):
+                dq = np.array(
+                    [np.cos(angle / 2.0), *(np.sin(angle / 2.0) * np.asarray(axis))]
+                )
+                out = np.zeros(4)
+                mujoco.mju_mulQuat(out, dq, q)
+                q = out
+            d.qpos[3:7] = q
+            mujoco.mj_forward(m, d)
+            com = np.asarray(d.subtree_com[0])
+            mid = self._support_centroid()
+            return np.array([
+                self._heel_z("calcn_r"), self._toe_z("calcn_r"),
+                self._heel_z("calcn_l"), self._toe_z("calcn_l"),
+                com[0] - mid[0], com[1] - mid[1],
+            ])
+
+        x = np.concatenate([[d.qpos[a] for a in adr], [d.qpos[2]], [0.0, 0.0]])
+        for _ in range(iterations):
+            r = residual(x)
+            if np.abs(r).max() < 1e-7:
+                break
+            jac = np.zeros((r.size, x.size))
+            eps = 1e-5
+            for k in range(x.size):
+                xp = x.copy()
+                xp[k] += eps
+                jac[:, k] = (residual(xp) - r) / eps
+            step = -np.linalg.solve(jac.T @ jac + 1e-9 * np.eye(x.size), jac.T @ r)
+            norm = np.linalg.norm(step)
+            if norm > 0.05:
+                step *= 0.05 / norm
+            x = x + step
+            x[:n_var] = np.clip(x[:n_var], lo_b, hi_b)
+        self.seat_residual = float(np.abs(residual(x)).max())
+
+    def _solve_stance_pose(self):
+        """Solve for a plantigrade, balanced, upright standing pose.
+
+        The shipped keyframe is a mid-stride pose, not a stance: the hips
+        differ by 0.43 rad, hip_rotation_r is -35 degrees, the feet are 0.23 m
+        apart along the facing direction and the trunk is flexed 30 degrees.
+        Dropping the model from it lands it on its toes with both heels in the
+        air -- a bad place to start a locomotion curriculum. It is
+        near-singular, it biases the ankle plantarflexors from step one, and it
+        leaves no heel contact for a gait reward to read.
+
+        A symmetric pose cannot fix it either. With identical joint angles and
+        level hips the right femur is 23.5 mm shorter than the left, so one
+        foot is always off the ground. The solve therefore treats the legs
+        independently and lets lat_bending absorb the difference, which is what
+        a person with a leg-length discrepancy does.
+
+        Residuals, driven to zero by damped Gauss-Newton:
+
+          * each foot's heel and toe both at z = 0  (plantigrade, both feet)
+          * the COM horizontally over the midpoint of the feet  (balanced)
+          * the trunk axis vertical  (upright)
+
+        Returns (qpos, pelvis_height), and raises rather than quietly handing
+        back a pose that is none of those things.
+        """
+        m, d = self.model, self.data
+        names = self._STANCE_VARS + self._STANCE_ZERO
+        qadr = {
+            n: int(m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)])
+            for n in names
+        }
+        limits = [
+            m.jnt_range[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)]
+            for n in self._STANCE_VARS
+        ]
+        n_var = len(self._STANCE_VARS)
+        upright = np.array([1.0, 0.0, 0.0, 0.0])
+
+        mujoco.mj_resetDataKeyframe(m, d, 0)
+        for n in self._STANCE_ZERO:
+            d.qpos[qadr[n]] = 0.0
+        d.qvel[:] = 0.0
+
+        def residual(x):
+            for n, v, (lo, hi) in zip(self._STANCE_VARS, x[:n_var], limits):
+                d.qpos[qadr[n]] = float(np.clip(v, lo, hi))
+            d.qpos[2] = x[n_var]
+            q = upright.copy()
+            for angle, axis in (
+                (x[n_var + 1], (0.0, 1.0, 0.0)),
+                (x[n_var + 2], (1.0, 0.0, 0.0)),
+            ):
+                dq = np.array(
+                    [np.cos(angle / 2.0), *(np.sin(angle / 2.0) * np.asarray(axis))]
+                )
+                out = np.zeros(4)
+                mujoco.mju_mulQuat(out, dq, q)
+                q = out
+            d.qpos[3:7] = q
+            mujoco.mj_forward(m, d)
+            com = np.asarray(d.subtree_com[0])
+            mid = self._support_centroid()
+            up = self.trunk_axis()
+            return np.array([
+                self._heel_z("calcn_r"), self._toe_z("calcn_r"),
+                self._heel_z("calcn_l"), self._toe_z("calcn_l"),
+                com[0] - mid[0], com[1] - mid[1],
+                up[0], up[1],
+            ])
+
+        x = np.zeros(n_var + 3)
+        x[self._STANCE_VARS.index("knee_angle_r")] = 0.10
+        x[self._STANCE_VARS.index("knee_angle_l")] = 0.10
+        x[n_var] = 0.95
+        lo_b = np.array([l[0] for l in limits])
+        hi_b = np.array([l[1] for l in limits])
+
+        # Two passes: the four foot residuals first, then all eight. Starting
+        # the full solve from a pose whose feet are already flat is what makes
+        # it converge; from the keyframe the COM and foot residuals pull
+        # against each other and it wanders into the joint limits instead.
+        for n_res in (4, 8):
+            for _ in range(200):
+                r = residual(x)[:n_res]
+                if np.abs(r).max() < 1e-7:
+                    break
+                jac = np.zeros((n_res, x.size))
+                eps = 1e-5
+                for k in range(x.size):
+                    xp = x.copy()
+                    xp[k] += eps
+                    jac[:, k] = (residual(xp)[:n_res] - r) / eps
+                step = -np.linalg.solve(
+                    jac.T @ jac + 1e-9 * np.eye(x.size), jac.T @ r
+                )
+                norm = np.linalg.norm(step)
+                if norm > 0.05:
+                    step *= 0.05 / norm
+                x = x + step
+                x[:n_var] = np.clip(x[:n_var], lo_b, hi_b)
+
+        r = residual(x)
+        worst = float(np.abs(r).max())
+        if worst > 1e-4:
+            raise RuntimeError(
+                "could not solve a plantigrade standing stance for %s "
+                "(worst residual %.2e). The model's foot geometry or joint "
+                "ranges may differ from what this env expects."
+                % (self.model_path.name, worst)
+            )
+        self.stance_residual = worst
+        return d.qpos.copy(), float(d.xipos[self.pelvis_id][2])
 
     # -- observation -------------------------------------------------------
 
@@ -353,9 +617,14 @@ class MyoLocomotionEnv(gym.Env):
         mujoco.mj_subtreeVel(self.model, self.data)
         return np.asarray(self.data.subtree_linvel[0]).copy()
 
-    def foot_contact_loads(self) -> np.ndarray:
-        """Vertical contact force per foot, as a fraction of body weight."""
-        out = np.zeros(len(self.foot_geoms))
+    def contact_loads(self) -> np.ndarray:
+        """Vertical load on [heel_r, toe_r, heel_l, toe_l], as a fraction of BW.
+
+        Heel and toe are kept apart because the difference between them is
+        gait phase -- heel strike loads the rear group, toe-off the forward
+        one -- and a single per-foot total cannot tell those apart.
+        """
+        out = np.zeros(4)
         buf = np.zeros(6)
         for i in range(self.data.ncon):
             con = self.data.contact[i]
@@ -363,12 +632,22 @@ class MyoLocomotionEnv(gym.Env):
             mujoco.mj_contactForce(self.model, self.data, i, buf)
             frame = np.asarray(con.frame).reshape(3, 3)
             fz = float((frame.T @ buf[:3])[2])
-            for k, geoms in enumerate(self.foot_geoms):
+            for k, geoms in enumerate(self._load_groups):
                 if g2 in geoms:
                     out[k] += fz
                 elif g1 in geoms:
                     out[k] -= fz
         return np.maximum(out, 0.0) / self.body_weight
+
+    def foot_contact_loads(self) -> np.ndarray:
+        """Vertical load per foot (heel + toe), as a fraction of body weight."""
+        loads = self.contact_loads()
+        return np.array([loads[0] + loads[1], loads[2] + loads[3]])
+
+    def heel_contact_loads(self) -> np.ndarray:
+        """Vertical load under each heel, as a fraction of body weight."""
+        loads = self.contact_loads()
+        return np.array([loads[0], loads[2]])
 
     def _get_obs(self) -> np.ndarray:
         d, m = self.data, self.model
@@ -381,7 +660,7 @@ class MyoLocomotionEnv(gym.Env):
             d.qpos[self.joint_qpos_adr],
             d.qvel[self.joint_dof_adr],
             [vf, vl, float(self.com_velocity()[2])],
-            self.foot_contact_loads(),
+            self.contact_loads(),
         ]
         if self._include_activation:
             # The 290 muscle activation states. Without these the observation
@@ -403,7 +682,7 @@ class MyoLocomotionEnv(gym.Env):
             ("joint_q", len(self.joint_qpos_adr)),
             ("joint_dq", len(self.joint_dof_adr)),
             ("com_vel_fwd_lat_up", 3),
-            ("foot_load", len(self.foot_geoms)),
+            ("contact_load_heel_toe", 4),
         ]
         if self._include_activation:
             layout.append(("muscle_activation", int(self.model.na)))
@@ -432,6 +711,15 @@ class MyoLocomotionEnv(gym.Env):
         # Resolve kinematics before touching the root velocity: the facing
         # direction is read off body positions, so it needs the pose settled.
         mujoco.mj_forward(self.model, self.data)
+
+        # The stance solve puts both heels and both toes exactly on the floor,
+        # but the randomisation above then tilts the feet: 0.02 rad at the
+        # ankle moves a 0.2 m foot by 4 mm, which is enough to lift a heel off
+        # a perfectly flat solve entirely. Re-flatten each foot through its own
+        # ankle, then re-seat the model vertically. Without this the right heel
+        # carried no load at all on some resets, and penetration on others made
+        # the reset load reach 1.5x body weight.
+        self._seat_feet()
 
         # Freeze the heading the episode starts from. Everything directional --
         # the velocity, lateral and heading terms -- is measured against this,

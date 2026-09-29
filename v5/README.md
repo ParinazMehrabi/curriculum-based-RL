@@ -16,7 +16,7 @@ v5/
   scripts/
     validate_env.py  smoke test: frame, Markov property, reward safety, gradient
     render.py        multi-view still or rollout figure
-  tests/          27 tests
+  tests/          35 tests
   figures/        rendered PNGs (referenced above)
 ```
 
@@ -130,6 +130,56 @@ The policy emits `[-1, 1]` and the environment maps it to activation `[0, 1]`,
 so **a zero action is half activation, not rest.** v4's action rate limiter is
 kept, and `prev_action` stays in the observation for the reason v4 documents.
 
+## The standing stance is solved, not inherited
+
+The shipped keyframe is a **mid-stride pose, not a stance**: the hips differ by
+0.43 rad, `hip_rotation_r` is -35 degrees, the feet are 0.23 m apart along the
+facing direction and the trunk is flexed 30 degrees. Dropping the model from it
+lands it **on its toes with both heels 23 mm in the air** -- near-singular,
+biased toward the ankle plantarflexors from step one, and with no heel contact
+for a gait reward to read.
+
+A symmetric pose cannot fix it either. With identical joint angles and level
+hips, the right femur is **23.5 mm shorter than the left**, so one foot is
+always off the ground.
+
+So `_solve_stance_pose()` solves for the stance instead, by damped
+Gauss-Newton over six leg angles, two trunk angles, pelvis height and root
+pitch/roll, against:
+
+- each foot's heel **and** toe at `z = 0` (plantigrade, both feet),
+- the COM horizontally over the **base of support**, and
+- the trunk axis vertical.
+
+It converges to a residual of about `1e-12`. `lat_bending` settles at
+-0.126 rad, which is the model taking up its own leg-length difference -- what
+a person with a leg-length discrepancy does.
+
+Reset randomisation then breaks it again, in two ways: 0.02 rad at the ankle
+tilts a 0.2 m foot by 4 mm and lifts the heel, and a hip or knee perturbation
+moves a whole foot by up to 30 mm. `_seat_feet()` projects back onto the
+constraints after randomising, sharing the same unknowns because a per-leg
+solve is not enough -- the knee's lower limit is full extension, so once a leg
+is straight it cannot lengthen and the per-leg Newton stalls a millimetre
+short. Nine unknowns against six constraints, solved least-norm, costs about
+8 ms per reset.
+
+Measured over 40 resets: **both heels on the floor 40/40** (worst gap 1e-7 m),
+total contact load 0.87-1.35 body weights, COM over the base to 1e-12 m.
+
+Two honest caveats. A heel resting at `z = 0` does not always *carry* force --
+the split between heel and toe is the contact solver's to make in a statically
+indeterminate stance, and both heels are loaded on about 30 of 40 resets.
+And without a trained policy the model pitches forward and unloads its heels
+within about six steps; holding the stance is the policy's job, not the reset's.
+
+### Contact load is reported heel and toe separately
+
+`contact_loads()` returns `[heel_r, toe_r, heel_l, toe_l]` as fractions of body
+weight, and that split is in the observation. A single per-foot total cannot
+distinguish heel strike from toe-off, and that difference *is* gait phase.
+`foot_contact_loads()` and `heel_contact_loads()` are the obvious reductions.
+
 ## Three things that were wrong first, and are now tested
 
 These are the bugs a training run would have hidden rather than surfaced, so
@@ -161,18 +211,21 @@ something. `validate_env.py` checks every term is off its floor at reset.
 
 In the order I would tackle them:
 
-1. **Train something.** There is no trained policy yet -- the rollouts in
+1. **Hold the stance.** The reset is now a balanced plantigrade stance, but
+   nothing keeps it: the model pitches forward and unloads both heels within
+   about six steps. That is what stage A is for.
+2. **Train something.** There is no trained policy yet -- the rollouts in
    `render.py` are an untrained body falling over, which is what an untrained
    muscle body does. MyoSuite ships `myoLegWalk-v0` baselines worth reading
    first, and DEP-RL is designed for exactly this overactuation (it was v4's
    "Not done" item 3, and unlike v4's 9-torque model this body is the kind
    DEP-RL targets).
-2. **A reference trajectory and RSI.** v4's `trajectory.py` loads OpenSim
+3. **A reference trajectory and RSI.** v4's `trajectory.py` loads OpenSim
    `.sto` files and its keyframe/chaining curriculum is the part most worth
    porting. It needs a reference whose dof names and sign conventions match
    this model -- and note the warning in v4's README section 11 about the
    existing reference disagreeing with the model on knee sign.
-3. **Arms, then crutches**, on `myobody_simpleupper.xml`.
-4. **Pathological gait.** MyoSuite ships `myoFati*` (fatigue) and `myoSarc*`
+4. **Arms, then crutches**, on `myobody_simpleupper.xml`.
+5. **Pathological gait.** MyoSuite ships `myoFati*` (fatigue) and `myoSarc*`
    (sarcopenia) environment variants. Those are the mechanism for modelling
    impairment directly, rather than inferring it from an assistive device.

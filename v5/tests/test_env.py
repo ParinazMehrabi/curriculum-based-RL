@@ -200,6 +200,89 @@ def test_initial_push_is_along_the_facing_direction(walk_env):
     assert walk_env.compute_terms()["lateral"] > 0.9
 
 
+# -- the standing stance and foot contact (regression) ---------------------
+
+
+def test_reset_stance_is_plantigrade_on_both_feet(env):
+    """Regression: the model used to start up on its toes, heels 23 mm up.
+
+    The shipped keyframe is a mid-stride pose -- hips 0.43 rad apart, feet
+    0.23 m apart along the facing direction -- and dropping the model from it
+    landed it on its forefeet with both heels in the air. That is a bad start
+    for a locomotion curriculum: near-singular, it biases the ankle
+    plantarflexors from step one, and it leaves no heel contact for a gait
+    reward to read.
+    """
+    for seed in range(12):
+        env.reset(seed=seed)
+        for foot in ("calcn_r", "calcn_l"):
+            heel, toe = env._heel_z(foot), env._toe_z(foot)
+            assert abs(heel) < 1e-4, "%s heel is %.5f m off the floor" % (foot, heel)
+            assert abs(toe) < 1e-4, "%s toe is %.5f m off the floor" % (foot, toe)
+
+
+def test_both_heels_are_on_the_floor_after_randomisation(env):
+    """Reset noise must not be able to lift a foot.
+
+    0.02 rad at the ankle moves a 0.2 m foot 4 mm, and a hip or knee
+    perturbation moved a whole foot by up to 30 mm, so the reset re-seats both
+    feet against the randomised pose.
+    """
+    heights = []
+    for seed in range(20):
+        env.reset(seed=seed)
+        heights.append(max(env._heel_z("calcn_r"), env._heel_z("calcn_l")))
+    assert max(heights) < 1e-4, "worst heel height %.6f m" % max(heights)
+
+
+def test_heel_and_toe_loads_are_reported_separately(env):
+    """A single per-foot total cannot distinguish heel strike from toe-off."""
+    env.reset(seed=0)
+    loads = env.contact_loads()
+    assert loads.shape == (4,)
+    assert np.all(loads >= 0.0)
+    per_foot = env.foot_contact_loads()
+    assert per_foot[0] == pytest.approx(loads[0] + loads[1])
+    assert per_foot[1] == pytest.approx(loads[2] + loads[3])
+    heels = env.heel_contact_loads()
+    assert heels[0] == pytest.approx(loads[0])
+    assert heels[1] == pytest.approx(loads[2])
+
+
+def test_contact_load_is_in_the_observation_split_four_ways(env):
+    assert dict(env.obs_layout())["contact_load_heel_toe"] == 4
+
+
+def test_reset_carries_about_one_body_weight(env):
+    """A balanced stance is in static equilibrium; a toppling one is not.
+
+    Before the COM was targeted at the base of support rather than the calcn
+    midpoint, this read 1.47 body weights at reset.
+    """
+    for seed in range(8):
+        env.reset(seed=seed)
+        assert 0.7 < env.contact_loads().sum() < 1.6
+
+
+def test_reset_com_sits_over_the_base_of_support(env):
+    for seed in range(8):
+        env.reset(seed=seed)
+        offset = np.asarray(env.data.subtree_com[0])[:2] - env._support_centroid()[:2]
+        assert np.abs(offset).max() < 5e-3, "COM is %s m off the base" % offset
+
+
+def test_reset_trunk_is_upright(env):
+    for seed in range(8):
+        env.reset(seed=seed)
+        assert env.trunk_tilt() < 0.15
+
+
+def test_stance_solve_converged(env):
+    assert env.stance_residual < 1e-4
+    env.reset(seed=0)
+    assert env.seat_residual < 1e-4
+
+
 def test_anatomical_axes_are_orthonormal(env):
     env.reset(seed=0)
     right, fwd = env.right_axis(), env.forward_axis()
