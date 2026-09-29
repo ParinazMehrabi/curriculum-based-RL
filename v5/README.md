@@ -1,0 +1,178 @@
+# Muscle-actuated locomotion (v5)
+
+A full-body **musculoskeletal** locomotion environment on MuJoCo, replacing
+v4's planar 9-torque skeleton with MyoSuite's MyoFullBody model: 26 bodies,
+53 qpos, **290 Hill-type muscles**, 82 kg.
+
+![the model](figures/myo_model.png)
+
+```
+v5/
+  myo_curriculum/
+    rewards.py    loads v4's reward primitives (not a copy -- see below)
+    stages.py     the two stages, as data
+    env.py        the single environment class
+    __init__.py   gymnasium registration + variant helper
+  scripts/
+    validate_env.py  smoke test: frame, Markov property, reward safety, gradient
+    render.py        multi-view still or rollout figure
+  tests/          27 tests
+  figures/        rendered PNGs (referenced above)
+```
+
+No crutches yet. This is the "plain muscle locomotion first" step; the crutch
+curriculum lives in `v4/` and is unaffected.
+
+## Setup
+
+MyoSuite needs **Python 3.10+**, which v4 cannot use -- it is pinned to 3.9 by
+`gym<0.22`, which sconegym requires. So v5 gets its own environment:
+
+```powershell
+pip install uv
+uv python install 3.12
+uv venv --python 3.12 .venv-myo
+uv pip install --python .venv-myo/Scripts/python.exe myosuite pytest matplotlib pillow
+```
+
+Then, from `v5/`:
+
+```bash
+../.venv-myo/Scripts/python.exe scripts/validate_env.py
+../.venv-myo/Scripts/python.exe scripts/render.py
+../.venv-myo/Scripts/python.exe -m pytest tests -q
+```
+
+Nothing here needs SCONE, sconegym, sconepy or a Hyfydy licence. The model
+ships inside the `myosuite` wheel under Apache-2.0.
+
+### The bigger MyoSkeleton is opt-in, and is your decision
+
+`myobody.xml` is Apache-licensed and is what this package uses. MyoSuite can
+additionally fetch a larger MyoSkeleton (~100 MB) from `myolab/myo_model`, but
+only under a **non-commercial scientific research licence** that you have to
+accept interactively:
+
+```bash
+../.venv-myo/Scripts/python.exe -m myosuite_init
+```
+
+That prompt is a licence agreement, so it is yours to accept, not something
+this repo does for you. Nothing here depends on it. If you do accept it,
+`MyoLocomotionEnv(model_path=...)` takes any MuJoCo muscle model, so switching
+is one argument.
+
+## What the model is
+
+| | |
+|---|---|
+| bodies | 26 -- pelvis, full lumbar spine (L1-L5), torso, neck, head, both legs with patellae |
+| qpos / qvel | 53 / 52 |
+| muscles | 290 Hill-type, with 290 activation states |
+| mass | 82.04 kg |
+| speed | ~850 env steps/s single-threaded (`frame_skip=10`, so ~8.5k physics steps/s) |
+
+**No arms.** `myobody.xml` is full-body from the pelvis up through the head,
+but has no upper limbs. That does not matter for unaided locomotion and does
+matter later: welding crutches needs forearms. When that time comes,
+`myo_sim/body/myobody_simpleupper.xml` is the variant to use -- it has
+`humerus/ulna/radius/hand` on both sides driven by 14 torque actuators plus 86
+muscles, which is the same split v4 used (muscle-free torque arms holding the
+crutches).
+
+**Only 17 joints are independent.** The model has 46 non-root joints; 29 of
+them are driven by equality constraints -- the knee's rolling contact
+(`knee_angle_*_translation*`, `_rotation*`, `_beta_*`) follows `knee_angle_*`,
+and the lumbar levels distribute the three trunk angles. `env.py` writes only
+the 17 independent ones at reset and lets the solver resolve the rest;
+perturbing a constrained joint directly would fight the constraint rather than
+pose the model.
+
+## What carries over from v4, and what does not
+
+### The reward machinery carries over, by import
+
+`v5/myo_curriculum/rewards.py` loads `v4/sconegym_crutch_v4/rewards.py` rather
+than copying it. That file has no simulator, gym or Python-version dependency,
+and it encodes design work worth keeping: every term is in `[0, 1]`, terms
+compose as a weighted geometric mean so no term can be farmed in isolation, and
+`termination_report()` proves the per-step reward cannot go negative. Copying
+it was the exact failure v4 was written to undo, so v5 imports it by path --
+which also skips v4's `__init__`, which imports gym 0.21.
+
+### The terms do not carry over
+
+Two kinds are new, because the body is:
+
+- **Out-of-plane terms.** v4's model was strictly sagittal: every joint was a
+  z-hinge, so falling sideways and turning were structurally impossible. Here
+  they are the most common failure, hence `lateral` and `heading`, and
+  termination checks trunk tilt as well as height.
+- **An effort term.** 290 muscles are hugely overactuated -- many activation
+  patterns produce the same motion and most are co-contraction a person would
+  not use. `effort` selects among them. Nine torque actuators did not need it.
+  It is deliberately loose (flat below a mean activation of 0.15): a tight
+  effort penalty on an overactuated model suppresses motion before it
+  suppresses co-contraction.
+
+| stage | task | terms |
+|---|---|---|
+| **A** | hold a standing posture | height, upright, effort |
+| **B** | walk forward at 1.2 m/s | + velocity, lateral, heading |
+
+Stage A has **no velocity term at all**, rather than a velocity term with a
+target of zero. A zero target rewards freezing, and would make the A→B
+transition a discrete change in what the reward measures.
+
+### Actions are activations, not torques
+
+The policy emits `[-1, 1]` and the environment maps it to activation `[0, 1]`,
+so **a zero action is half activation, not rest.** v4's action rate limiter is
+kept, and `prev_action` stays in the observation for the reason v4 documents.
+
+## Three things that were wrong first, and are now tested
+
+These are the bugs a training run would have hidden rather than surfaced, so
+each has a regression test.
+
+**1. The body frames are locally y-up inside a z-up world.** The model's world
+is z-up, but its body frames carry the OpenSim convention -- the torso frame's
+own `+y` is what points at the sky. Reading a body's local `+z` as "up"
+measured an **89° trunk tilt on a model standing perfectly straight**, and
+every episode terminated on step 1. Posture is now derived from the
+pelvis-to-head vector and heading from the hip-to-hip vector, which are
+unambiguous whatever the frame convention.
+
+**2. The neutral pose faces 109°, not +x.** `initial_forward_velocity` was
+being written to the root's world-x dof, so stage B launched the model mostly
+*sideways* -- the `lateral` term scored 0.23 at reset, punishing the
+environment's own initial condition. The push now goes along the model's facing
+direction, and everything directional is measured against the heading recorded
+at reset. `lateral` now scores 1.00 there.
+
+**3. Stage B's velocity target had no gradient from standstill.** At the
+initial sigma of 0.35 against a 1.2 m/s target, a motionless model scored
+`exp(-(1.2/0.35)²) = 7e-6`, which the term floor then flattened completely.
+This is the same trap v4's stage D fell into and its README documents. Sigma is
+now 0.80, so standstill scores 0.11 and every 0.1 m/s gained is worth
+something. `validate_env.py` checks every term is off its floor at reset.
+
+## Not done
+
+In the order I would tackle them:
+
+1. **Train something.** There is no trained policy yet -- the rollouts in
+   `render.py` are an untrained body falling over, which is what an untrained
+   muscle body does. MyoSuite ships `myoLegWalk-v0` baselines worth reading
+   first, and DEP-RL is designed for exactly this overactuation (it was v4's
+   "Not done" item 3, and unlike v4's 9-torque model this body is the kind
+   DEP-RL targets).
+2. **A reference trajectory and RSI.** v4's `trajectory.py` loads OpenSim
+   `.sto` files and its keyframe/chaining curriculum is the part most worth
+   porting. It needs a reference whose dof names and sign conventions match
+   this model -- and note the warning in v4's README section 11 about the
+   existing reference disagreeing with the model on knee sign.
+3. **Arms, then crutches**, on `myobody_simpleupper.xml`.
+4. **Pathological gait.** MyoSuite ships `myoFati*` (fatigue) and `myoSarc*`
+   (sarcopenia) environment variants. Those are the mechanism for modelling
+   impairment directly, rather than inferring it from an assistive device.
