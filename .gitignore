@@ -27,3 +27,6 @@ v4/notebooks/results/
 
 # The Python 3.12 environment for v5 (MyoSuite needs 3.10+; v4 is pinned to 3.9)
 .venv-myo/
+
+# MuJoCo writes this next to wherever it is run from
+MUJOCO_LOG.TXT
