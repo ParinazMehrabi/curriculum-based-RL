@@ -130,6 +130,11 @@ def main(argv=None) -> int:
             record.append({
                 "step": env.steps, "reward": reward,
                 "terms": dict(env.term_values), "terminal": env.terminal_bonus,
+                # Forward progress is paid once at the end, so per step show
+                # what it is worth so far -- otherwise the biggest term in the
+                # reward is invisible until the last line.
+                "forward": env.forward_bonus(), "travel": env.travel,
+                "velocity": env.forward_velocity(),
             })
             reset_flag = torch.zeros(1)
             if terminated or truncated:
@@ -142,9 +147,9 @@ def main(argv=None) -> int:
     caps = contributions(env, {})
     print("best of %d episodes (seed %d): return %.2f of %.0f, %d steps"
           % (args.episodes, best["seed"], best["return"], max_episode, best["length"]))
-    print("max per step: " + "   ".join("%s %.2f" % (n, c) for n, _, c in caps)
-          + "   =  %.2f" % max_step)
-    print("-" * 96)
+    print("max:  per step " + "  ".join("%s %.2f" % (n, c) for n, _, c in caps)
+          + " = %.2f   |   at the end  forward %.0f" % (max_step, max_terminal))
+    print("-" * 112)
     for row in best["record"]:
         if row["step"] % args.every and row is not best["record"][-1]:
             continue
@@ -153,14 +158,13 @@ def main(argv=None) -> int:
             for name, value, cap in contributions(env, row["terms"])
         )
         shown = row["reward"] - row["terminal"]
-        print("step %4d: reward %+.4f (%5.1f%% of max): %s"
-              % (row["step"], shown, pct(shown, max_step), parts))
-    print("-" * 96)
-    if max_terminal > 0:
-        print("forward progress at the end: travel %+.4f m of %.2f m -> %.2f (%.1f%% of %.0f)"
-              % (best["travel"], env.stage_spec.forward_target_distance,
-                 best["terminal"], pct(best["terminal"], max_terminal), max_terminal))
-    print("return %.2f = %.2f per-step + %.2f terminal  (%.1f%% of %.0f)"
+        print("step %4d: reward %+.4f (%5.1f%%): %s | forward %7.2f (%5.1f%%)  "
+              "travel %+.3f m  v %+.3f m/s"
+              % (row["step"], shown, pct(shown, max_step), parts,
+                 row["forward"], pct(row["forward"], max_terminal),
+                 row["travel"], row["velocity"]))
+    print("-" * 112)
+    print("return %.2f = %.2f per-step + %.2f forward  (%.1f%% of %.0f)"
           % (best["return"], best["return"] - best["terminal"], best["terminal"],
              pct(best["return"], max_episode), max_episode))
     env.close()
