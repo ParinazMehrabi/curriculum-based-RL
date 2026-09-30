@@ -5,13 +5,11 @@ coefficients, so there is one environment class rather than a family of
 near-identical ones.
 
 The task is different from v4's, and so are the terms. v4 drove a planar
-9-torque skeleton with welded crutches; this drives a 3-D, 290-muscle full
-body with no assistive device, so two kinds of term are new:
+9-torque skeleton with welded crutches; this drives a planar 290-muscle body
+with no assistive device. The model is planar like v4's, so lateral drift and
+turning are structurally impossible and need no terms. One kind of term is
+new:
 
-* **Out-of-plane terms.** v4's model was strictly sagittal -- every joint was a
-  z-hinge -- so lateral drift and turning were structurally impossible and had
-  no terms. Here they are the most common failure mode, hence `lateral` and
-  `heading`.
 * **An effort term.** 290 Hill-type muscles are hugely overactuated: many
   activation patterns produce the same motion, and most of them are
   co-contraction that a real person would not use. `effort` selects among them.
@@ -43,13 +41,6 @@ class TermParams:
     # velocity: forward speed error, m/s
     velocity_sigma: float = 0.35
 
-    # lateral: sideways speed, m/s. Tighter than `velocity` on purpose --
-    # sideways motion is never wanted, whereas forward speed has a target.
-    lateral_sigma: float = 0.25
-
-    # heading: yaw away from +x, in radians
-    heading_sigma: float = 0.50
-
     # effort: mean muscle activation that still scores well. 0.15 is a
     # deliberately loose budget -- tight effort penalties on an overactuated
     # model suppress motion before they suppress co-contraction.
@@ -67,11 +58,9 @@ class StageSpec:
     target_vel: float = 0.0
     episode_steps: int = 1000
 
-    # Lateral distance between the feet in the reset stance, metres. The hips
-    # are 0.154 m apart, so this is a touch wider than hip width. It has to be
-    # constrained explicitly: nothing in the model stops the legs crossing,
-    # and MyoSuite ships foot-to-foot collision pairs that fire when they do.
-    stance_width: float = 0.17
+    # Stance width needs no parameter any more: hip adduction is pinned to
+    # zero by the planar constraint, so the feet sit at the model's own hip
+    # spacing and the legs cannot cross.
 
     # Termination. The model stands with its pelvis near 0.98 m.
     min_pelvis_height: float = 0.65
@@ -192,11 +181,12 @@ STAGE_B = StageSpec(
             # documents: with several terms each exponent shrinks, and the
             # terms that reward *not moving* (height, upright, effort) are all
             # satisfied by standing still. Walking has to be worth more.
+            # Dropping `lateral` and `heading` with the move to a planar model
+            # helps here too -- both were satisfied by standing still, and
+            # removing them raises every remaining term's exponent.
             "velocity": 0.50,
             "height": 0.25,
             "upright": 0.25,
-            "lateral": 0.20,
-            "heading": 0.15,
             "effort": 0.15,
         },
     ),

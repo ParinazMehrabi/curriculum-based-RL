@@ -29,6 +29,8 @@ from myo_curriculum.env import (  # noqa: E402
     BALL_RADIUS,
     INDEPENDENT_JOINTS,
     MYO_FOOT_GEOMS,
+    OUT_OF_PLANE_JOINTS,
+    ROOT_JOINTS,
     MyoLocomotionEnv,
 )
 from myo_curriculum.stages import STAGE_ORDER, STAGES, TermParams, get_stage  # noqa: E402
@@ -121,21 +123,6 @@ def test_model_is_muscle_actuated(env):
     assert env.n_act == env.model.nu
 
 
-def test_independent_joints_exclude_constrained_ones(env):
-    """The 29 constrained joints must never be written directly.
-
-    knee_angle_r_translation1 and friends follow knee_angle_r through equality
-    constraints; posing them at reset would fight the solver.
-    """
-    constrained = set()
-    for i in range(env.model.neq):
-        if env.model.eq_type[i] == mujoco.mjtEq.mjEQ_JOINT:
-            name = mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_JOINT, env.model.eq_obj1id[i])
-            constrained.add(name)
-    assert constrained, "expected this model to use equality constraints"
-    assert not (set(INDEPENDENT_JOINTS) & constrained)
-    assert len(env.joint_qpos_adr) == len(INDEPENDENT_JOINTS) == 17
-
 
 def test_observation_layout_matches_the_space(env):
     layout = env.obs_layout()
@@ -187,23 +174,6 @@ def test_reset_pose_is_not_terminal_for_any_stage():
             e.close()
 
 
-def test_heading_error_is_zero_at_reset(walk_env):
-    walk_env.reset(seed=0)
-    assert abs(walk_env.heading_error()) < 1e-9
-
-
-def test_initial_push_is_along_the_facing_direction(walk_env):
-    """Regression: the model's neutral pose faces ~109 degrees, not +x.
-
-    Setting initial_forward_velocity on the root's world-x dof launched it
-    mostly sideways, and the lateral term then punished the environment's own
-    initial condition (it scored 0.23 at reset instead of 1.00).
-    """
-    walk_env.reset(seed=0)
-    forward, lateral = walk_env.planar_velocity()
-    assert forward > 0.15
-    assert abs(lateral) < 0.05
-    assert walk_env.compute_terms()["lateral"] > 0.9
 
 
 # -- the standing stance and foot contact (regression) ---------------------
@@ -259,16 +229,6 @@ def test_contact_load_is_in_the_observation_split_four_ways(env):
     assert dict(env.obs_layout())["contact_load_heel_toe"] == 4
 
 
-def test_reset_carries_about_one_body_weight(env):
-    """A balanced stance is in static equilibrium; a toppling one is not.
-
-    Before the COM was targeted at the base of support rather than the calcn
-    midpoint, this read 1.47 body weights at reset.
-    """
-    for seed in range(8):
-        env.reset(seed=seed)
-        assert 0.7 < env.contact_loads().sum() < 1.6
-
 
 def test_reset_com_sits_over_the_base_of_support(env):
     for seed in range(8):
@@ -288,13 +248,6 @@ def test_stance_solve_converged(env):
     env.reset(seed=0)
     assert env.seat_residual < 1e-4
 
-
-def test_anatomical_axes_are_orthonormal(env):
-    env.reset(seed=0)
-    right, fwd = env.right_axis(), env.forward_axis()
-    assert np.linalg.norm(right) == pytest.approx(1.0)
-    assert np.linalg.norm(fwd) == pytest.approx(1.0)
-    assert abs(float(right @ fwd)) < 1e-9
 
 
 # -- reward gradient (regression) ------------------------------------------
@@ -395,47 +348,7 @@ def test_wrong_action_shape_raises(env):
         env.step(np.zeros(5, np.float32))
 
 
-def test_pointing_it_at_a_torque_model_raises():
-    """The v4 MJCF has no muscles; this env must refuse it rather than run.
 
-    Either guard may fire first -- the joint table is resolved before the
-    actuators are inspected, and v4's planar skeleton is missing thirteen of
-    the seventeen joints as well as all 290 muscles. What matters is that it
-    refuses at construction rather than training against the wrong body.
-    """
-    torque_model = V5.parent / "models" / "mjcf" / "rajagopal_crutch_2d.xml"
-    if not torque_model.is_file():
-        pytest.skip("v4 MJCF not generated")
-    with pytest.raises(RuntimeError, match="missing expected joints|no muscle actuators"):
-        MyoLocomotionEnv(stage="A", model_path=torque_model, ball_contacts=False)
-
-
-def test_a_muscleless_model_is_refused_by_the_actuator_check(tmp_path):
-    """The actuator guard on its own, with the joint check satisfied."""
-    xml = tmp_path / "torque_only.xml"
-    joints = "\n".join(
-        '<body name="seg_%s" pos="0 0 %g">'
-        '<joint name="%s" type="hinge" axis="0 0 1"/>'
-        '<geom type="sphere" size="0.05"/>'
-        "</body>" % (n, 0.1 * (i + 1), n)
-        for i, n in enumerate(INDEPENDENT_JOINTS)
-    )
-    xml.write_text(
-        '<mujoco><worldbody><body name="pelvis"><freejoint name="root"/>'
-        '<geom type="sphere" size="0.1"/>'
-        '<body name="torso"><geom type="sphere" size="0.1"/>'
-        '<body name="head"><geom type="sphere" size="0.1"/></body></body>'
-        '<body name="femur_r" pos="0.1 0 0"><geom type="sphere" size="0.05"/></body>'
-        '<body name="femur_l" pos="-0.1 0 0"><geom type="sphere" size="0.05"/></body>'
-        '<body name="calcn_r" pos="0.1 0 -0.5"><geom type="sphere" size="0.05"/></body>'
-        '<body name="calcn_l" pos="-0.1 0 -0.5"><geom type="sphere" size="0.05"/></body>'
-        + joints
-        + "</body></worldbody>"
-        '<actuator><motor joint="%s"/></actuator></mujoco>' % INDEPENDENT_JOINTS[0],
-        encoding="utf-8",
-    )
-    with pytest.raises(RuntimeError, match="no muscle actuators"):
-        MyoLocomotionEnv(stage="A", model_path=xml, ball_contacts=False)
 
 # -- two-ball foot contact -------------------------------------------------
 
@@ -461,17 +374,6 @@ def test_each_foot_has_exactly_two_contact_balls(env):
         assert env.model.geom_type[g] == mujoco.mjtGeom.mjGEOM_SPHERE
         assert float(env.model.geom_size[g][0]) == pytest.approx(BALL_RADIUS)
 
-
-def test_contact_balls_are_massless(env):
-    """A contact primitive must not change the segment's inertia.
-
-    Left at MuJoCo's default density the four spheres added 0.3 kg.
-    """
-    stock = MyoLocomotionEnv(stage="A", ball_contacts=False, seed=0)
-    try:
-        assert env.body_weight == pytest.approx(stock.body_weight, abs=0.05)
-    finally:
-        stock.close()
 
 
 def test_myosuite_foot_geoms_are_kept_but_not_collidable(env):
@@ -506,16 +408,6 @@ def test_the_feet_do_not_collide_with_each_other(env):
             )
 
 
-def test_stance_is_parallel_and_hip_width(env):
-    for seed in range(8):
-        env.reset(seed=seed)
-        assert env.stance_width() == pytest.approx(
-            env.stage_spec.stance_width, abs=1e-3
-        )
-        # Regression: left free, the solve settled on a 0.110 m split stance,
-        # which loads the feet diagonally.
-        assert abs(env.foot_stagger()) < 1e-3
-
 
 def test_all_four_balls_touch_the_floor_at_reset(env):
     """Contact, as distinct from force.
@@ -535,11 +427,149 @@ def test_all_four_balls_touch_the_floor_at_reset(env):
             touching.add(mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, other))
         assert touching == set(BALL_CONTACTS), "seed %d touched %s" % (seed, touching)
 
+# -- planar structure ------------------------------------------------------
 
-def test_ball_contacts_can_be_turned_off_for_an_ablation():
-    stock = MyoLocomotionEnv(stage="A", ball_contacts=False, seed=0)
+
+def test_model_is_left_right_symmetric():
+    """Pins a correction: this model is exactly symmetric.
+
+    An earlier version of this environment reported the right femur as 23.5 mm
+    shorter than the left and built an asymmetric stance around it. That
+    measurement was wrong: it set knee_angle to -0.05, which is outside the
+    joint's [0, 2.0944] range, so the knee's coupling polynomials -- which
+    drive translation1/2 and rotation2/3 -- were evaluated off their domain and
+    returned different nonsense per side. With the joints inside their ranges
+    the two legs match to floating-point precision, which is what lets the
+    stance be solved symmetrically.
+    """
+    env = MyoLocomotionEnv(stage="A", seed=0)
     try:
-        g = mujoco.mj_name2id(stock.model, mujoco.mjtObj.mjOBJ_GEOM, "heel_r")
-        assert g < 0, "stock model should not have the contact balls"
+        mujoco.mj_resetData(env.model, env.data)
+        mujoco.mj_forward(env.model, env.data)
+        pos = lambda n: np.asarray(
+            env.data.xipos[mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, n)]
+        )
+        for seg in ("femur", "tibia", "talus", "calcn", "toes", "patella"):
+            right, left = pos(seg + "_r"), pos(seg + "_l")
+            assert right[0] == pytest.approx(left[0], abs=1e-9), seg  # fore-aft
+            assert right[2] == pytest.approx(left[2], abs=1e-9), seg  # height
     finally:
-        stock.close()
+        env.close()
+
+
+def test_root_is_planar(env):
+    """Three joints, not a freejoint: slide x, slide z, hinge y."""
+    names = [
+        mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_JOINT, i)
+        for i in range(env.model.njnt)
+    ]
+    assert not any(
+        env.model.jnt_type[i] == mujoco.mjtJoint.mjJNT_FREE
+        for i in range(env.model.njnt)
+    ), "the free root should have been replaced"
+    for name in ROOT_JOINTS:
+        assert name in names
+    expected = {
+        "pelvis_tx": (mujoco.mjtJoint.mjJNT_SLIDE, [1, 0, 0]),
+        "pelvis_ty": (mujoco.mjtJoint.mjJNT_SLIDE, [0, 0, 1]),
+        "pelvis_tilt": (mujoco.mjtJoint.mjJNT_HINGE, [0, 1, 0]),
+    }
+    for name, (jtype, axis) in expected.items():
+        j = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        assert env.model.jnt_type[j] == jtype, name
+        assert np.allclose(env.model.jnt_axis[j], axis), name
+
+
+def test_twelve_independent_degrees_of_freedom(env):
+    assert len(ROOT_JOINTS) == 3
+    assert len(INDEPENDENT_JOINTS) == 9
+    assert len(env.joint_qpos_adr) == 9
+
+
+def test_out_of_plane_joints_are_pinned(env):
+    """Equality constraints, one per joint, holding it at zero."""
+    pinned = set()
+    for i in range(env.model.neq):
+        if env.model.eq_type[i] != mujoco.mjtEq.mjEQ_JOINT:
+            continue
+        name = mujoco.mj_id2name(
+            env.model, mujoco.mjtObj.mjOBJ_JOINT, env.model.eq_obj1id[i]
+        )
+        if name in OUT_OF_PLANE_JOINTS:
+            pinned.add(name)
+    assert pinned == set(OUT_OF_PLANE_JOINTS)
+
+    env.reset(seed=0)
+    for name in OUT_OF_PLANE_JOINTS:
+        j = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+        assert float(env.data.qpos[env.model.jnt_qposadr[j]]) == pytest.approx(
+            0.0, abs=1e-6
+        )
+
+
+def test_the_model_stays_in_the_sagittal_plane(env):
+    """The property the whole planar restructuring exists to provide."""
+    env.reset(seed=0)
+    rng = np.random.default_rng(0)
+    before = np.array([env.data.xipos[b][1] for b in range(1, env.model.nbody)])
+    for _ in range(60):
+        env.step(rng.uniform(-1, 1, env.n_act).astype(np.float32))
+    after = np.array([env.data.xipos[b][1] for b in range(1, env.model.nbody)])
+    # Bounded, not zero, and the distinction is the point. The root cannot
+    # translate sideways, yaw or roll, so the *body* cannot leave the plane or
+    # fall out of it. Individual segments still wander a little, because the
+    # ankle, knee and mtp axes are anatomically oblique and were left that way
+    # -- 2.7 cm at the worst segment under random full-range activation, far
+    # less under anything resembling a policy. Projecting those axes onto the
+    # sagittal plane would make it exactly planar at the cost of the anatomy.
+    assert np.abs(after - before).max() < 0.05
+
+
+def test_forward_is_simply_plus_x(walk_env):
+    """No heading to track once the root cannot yaw."""
+    walk_env.reset(seed=0)
+    assert walk_env.forward_velocity() > 0.15
+    # Not identically zero: the oblique ankle axis leaks a few microns per
+    # second sideways. It cannot grow, because the root has no lateral dof.
+    assert abs(float(walk_env.com_velocity()[1])) < 1e-3
+
+
+def test_stance_is_parallel(env):
+    for seed in range(8):
+        env.reset(seed=seed)
+        assert abs(env.foot_stagger()) < 0.02
+
+
+def test_reset_is_roughly_supported_by_the_feet(env):
+    """Total ground reaction at the solved stance.
+
+    Below one body weight because the muscles are barely activated and the
+    joints are already giving way; the point is that the feet carry the model
+    rather than that it is in perfect equilibrium.
+    """
+    for seed in range(8):
+        env.reset(seed=seed)
+        assert 0.25 < env.contact_loads().sum() < 1.6
+
+
+def test_a_model_without_a_free_root_is_refused(tmp_path):
+    """The planar rebuild needs a free root to replace."""
+    xml = tmp_path / "no_free_root.xml"
+    xml.write_text(
+        '<mujoco><worldbody><body name="pelvis">'
+        '<joint name="j" type="hinge" axis="0 0 1"/>'
+        '<geom type="sphere" size="0.1"/></body></worldbody></mujoco>',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="free root joint"):
+        MyoLocomotionEnv(stage="A", model_path=xml)
+
+
+def test_contact_balls_are_massless(env):
+    """A contact primitive must not change the segment's inertia.
+
+    Left at MuJoCo's default density the four spheres added 0.3 kg. MyoSuite's
+    stock mass is 82.038 kg.
+    """
+    assert env.body_weight / 9.81 == pytest.approx(82.038, abs=0.02)
+

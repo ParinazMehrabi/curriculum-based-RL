@@ -1,32 +1,57 @@
-"""A muscle-actuated full-body locomotion environment.
+"""A planar, muscle-actuated locomotion environment.
 
-Drives MyoSuite's MyoFullBody model (`myo_sim/body/myobody.xml`, Apache-2.0):
-26 bodies, 53 qpos, 290 Hill-type muscles, 82 kg. Unlike v4's planar
-9-torque skeleton this is a 3-D musculoskeletal body, so the environment
-differs from v4's in four ways that are worth stating up front.
+MyoSuite's MyoFullBody model (`myo_sim/body/myobody.xml`, Apache-2.0) --
+26 bodies, 290 Hill-type muscles, 82 kg -- restructured to move in the
+sagittal plane only, matching the `.hfd` cane model this project is built
+around.
 
-**Muscle activation is state, and it is in the observation.** MuJoCo integrates
-an activation variable per muscle (`data.act`, 290 of them here) with
-first-order dynamics, so the force a muscle produces this step depends on
-activations the policy set several steps ago. Leaving `act` out of the
-observation would make the MDP non-Markov in exactly the way v4's hidden
-`prev_action` buffer did -- but with 290 hidden variables instead of 9. It
-dominates the observation vector for that reason.
+Why planar
+----------
+The `.hfd` is a 2-D model: a planar root (`pelvis_tx`, `pelvis_ty`,
+`pelvis_tilt`) and sagittal joints. MyoFullBody ships as a 3-D body with a
+free root, where lateral balance and heading are extra failure modes a policy
+has to solve before it can start walking at all. Removing them is the largest
+single reduction in problem difficulty available here, and it is what the
+source model does.
 
-**Only 17 joints are independent.** The model has 46 non-root joints, 29 of
-which are driven by equality constraints: the knee's rolling contact
-(`knee_angle_*_translation*`, `_rotation*`, `_beta_*`) follows `knee_angle_*`,
-and the lumbar levels (`L1_L2_*` through `L4_L5_*`) distribute the three trunk
-angles. Those are read, never written -- writing them at reset would fight the
-solver rather than pose the model. `INDEPENDENT_JOINTS` lists the 17.
+Three changes make it planar, applied through `MjSpec` at construction:
 
-**Actions are activations in [0, 1], not torques.** The policy emits [-1, 1]
-and the environment maps it, so a zero action is *half* activation, not rest.
-The rate limiter from v4 is kept and `prev_action` stays in the observation.
+* **The free root becomes three joints** -- slide x (forward), slide z (up),
+  hinge y (sagittal pitch) -- named as in the `.hfd`. The model cannot
+  translate sideways, yaw or roll.
+* **Eight out-of-plane joints are pinned to zero** by equality constraints:
+  hip adduction and rotation, subtalar, lumbar lateral bending and axial
+  rotation. Those were measured rather than guessed -- 0.15 rad of hip
+  adduction moves bodies 0.127 m out of plane, lateral bending 0.089 m, the
+  rest 0.015-0.021 m.
+* **The foot contact becomes two balls**, as in the `.hfd`. See below.
 
-**Out-of-plane failure is possible.** v4's model could not fall sideways or
-turn; this one does both, which is why `lateral` and `heading` terms exist and
-why termination checks trunk tilt in addition to height.
+Ankle, knee and mtp are left free. They are nominally sagittal but carry small
+oblique components (4.6 mm, 1.2 mm and 0.2 mm out of plane per 0.15 rad),
+which is real anatomy rather than an artefact. With a planar root those cannot
+accumulate into lateral motion, so the model behaves as 2-D while its joints
+stay anatomical.
+
+What remains
+------------
+Twelve independent degrees of freedom: three at the root, `flex_extension` for
+the trunk, and hip/knee/ankle/mtp on each leg. Twenty-nine more joints follow
+equality constraints -- the knee's rolling contact and the lumbar levels'
+distribution of the trunk angles -- and are read, never written; posing them
+directly would fight the solver.
+
+Muscle activation is state, and it is observed
+----------------------------------------------
+MuJoCo integrates an activation variable per muscle (`data.act`, 290 here)
+with first-order dynamics, so the force a muscle makes this step depends on
+activations set several steps ago. Leaving `act` out of the observation would
+make the MDP non-Markov exactly as v4's hidden `prev_action` buffer did, but
+with 290 hidden variables instead of 9. It dominates the observation for that
+reason.
+
+Actions are activations in [0, 1], not torques: the policy emits [-1, 1] and
+the environment maps it, so **a zero action is half activation, not rest**.
+v4's action rate limiter is kept and `prev_action` stays in the observation.
 
 The reward machinery is v4's, imported rather than copied -- see rewards.py.
 """
@@ -34,7 +59,7 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import mujoco
 import numpy as np
@@ -49,113 +74,88 @@ from .rewards import gaussian
 from .stages import StageSpec, get_stage
 
 GRAVITY = 9.81
+WORLD_UP = np.array([0.0, 0.0, 1.0])
+FORWARD = np.array([1.0, 0.0, 0.0])
 
-# The 17 joints that are not driven by an equality constraint, in model order.
-# Everything else below the root follows from these.
-INDEPENDENT_JOINTS: Tuple[str, ...] = (
-    "flex_extension",
-    "lat_bending",
-    "axial_rotation",
-    "hip_flexion_r",
-    "hip_adduction_r",
-    "hip_rotation_r",
-    "knee_angle_r",
-    "ankle_angle_r",
-    "subtalar_angle_r",
-    "mtp_angle_r",
-    "hip_flexion_l",
-    "hip_adduction_l",
-    "hip_rotation_l",
-    "knee_angle_l",
-    "ankle_angle_l",
-    "subtalar_angle_l",
-    "mtp_angle_l",
+# --------------------------------------------------------------------------
+# Planar structure
+# --------------------------------------------------------------------------
+
+# The root, named as in the .hfd. Forward is +x, up is +z, and the sagittal
+# pitch axis is +y, which is the model's own frontal axis at qpos = 0.
+ROOT_JOINTS = ("pelvis_tx", "pelvis_ty", "pelvis_tilt")
+ROOT_SPEC = (
+    ("pelvis_tx", mujoco.mjtJoint.mjJNT_SLIDE, (1.0, 0.0, 0.0)),
+    ("pelvis_ty", mujoco.mjtJoint.mjJNT_SLIDE, (0.0, 0.0, 1.0)),
+    ("pelvis_tilt", mujoco.mjtJoint.mjJNT_HINGE, (0.0, 1.0, 0.0)),
 )
 
+# Pinned to zero. Measured by perturbing each independent joint by 0.15 rad
+# and recording how far any body left the sagittal plane:
+#   hip_adduction 0.127 m, lat_bending 0.089, hip_rotation 0.021,
+#   subtalar 0.019, axial_rotation 0.015
+# against ankle 0.0046, knee 0.0012, mtp 0.00016 and flex_extension 3e-6,
+# which are left free.
+OUT_OF_PLANE_JOINTS = (
+    "hip_adduction_r", "hip_adduction_l",
+    "hip_rotation_r", "hip_rotation_l",
+    "subtalar_angle_r", "subtalar_angle_l",
+    "lat_bending", "axial_rotation",
+)
+
+# The nine non-root joints the policy and the reset actually drive.
+INDEPENDENT_JOINTS: Tuple[str, ...] = (
+    "flex_extension",
+    "hip_flexion_r", "knee_angle_r", "ankle_angle_r", "mtp_angle_r",
+    "hip_flexion_l", "knee_angle_l", "ankle_angle_l", "mtp_angle_l",
+)
+
+# Per-leg, in the order the seating solve uses them.
+LEG_JOINTS = {
+    "calcn_r": ("hip_flexion_r", "knee_angle_r", "ankle_angle_r"),
+    "calcn_l": ("hip_flexion_l", "knee_angle_l", "ankle_angle_l"),
+}
+
 FOOT_BODIES = ("calcn_r", "calcn_l")
+PELVIS_BODY = "pelvis"
+TORSO_BODY = "torso"
+HEAD_BODY = "head"
 
 # --------------------------------------------------------------------------
 # Foot contact: two balls per foot, as in the OpenSim/SCONE cane model
 # --------------------------------------------------------------------------
 #
-# The cane model this project is built around (models/hfd/Rajagopal2015_...hfd,
-# ported to MJCF in v4) gives each foot exactly two contact spheres:
-#
-#     heel_r  sphere r=0.03  on calcn_r  at (-0.085, -0.015, -0.005)
-#     toe_r   sphere r=0.03  on calcn_r  at (+0.085, -0.015,  0)
-#
-# MyoSuite's MyoFullBody instead wraps each foot in five capsules and an
-# ellipsoid. That is a different contact model: more geoms, a rolling sole
-# rather than two point-like supports, and no clean heel/toe split to read
-# gait phase from. This environment replaces it with the cane model's two
-# balls so contact behaves the way the rest of the project assumes.
-#
-# The MyoSuite geoms are not deleted, only taken out of collision
-# (contype/conaffinity = 0) and left in the visual group, so the foot still
-# renders as a foot.
+# The .hfd gives each foot exactly two contact spheres -- heel and toe, radius
+# 0.03. MyoFullBody instead wraps each foot in five capsules and an ellipsoid:
+# a rolling sole, with no clean heel/toe split to read gait phase from. The
+# MyoSuite geoms are not deleted, only taken out of collision and left in the
+# visual group, so the foot still renders as a foot.
 MYO_FOOT_GEOMS = (
     "r_foot_col1", "r_foot_col3", "r_foot_col4", "r_bofoot_col1", "r_bofoot_col2",
     "l_foot_col1", "l_foot_col3", "l_foot_col4", "l_bofoot_col1", "l_bofoot_col2",
 )
 
-BALL_RADIUS = 0.03  # the cane model's sphere radius, carried over unchanged
+BALL_RADIUS = 0.03
 
-# Where each ball sits, in its parent body's frame. Derived from this model's
-# own foot geometry -- the rearmost and forwardmost points of the MyoSuite
-# sole, dropped to the floor and raised by one ball radius -- rather than
-# copied from the .hfd, whose calcn frame is scaled and oriented differently.
-# scripts/derive_ball_contacts.py recomputes them; a test asserts the stance
-# they produce is plantigrade, so a stale value cannot pass silently.
+# Derived from this model's own sole geometry in the plantigrade stance -- the
+# rearmost and forwardmost points of the MyoSuite sole, dropped to the floor
+# and raised by one ball radius -- rather than copied from the .hfd, whose
+# calcn frame is scaled and oriented differently. Mirror-symmetric, because
+# the model is; `scripts/derive_ball_contacts.py` recomputes them.
 #
-# The heel ball goes on calcn and the toe ball on toes. The .hfd puts both on
-# calcn, but its own comment explains why that was free: "the mtp joint here
-# is locked 0..0 anyway, so this changes nothing kinematically". Here mtp is a
-# live joint with muscles crossing it, so the equivalent choice -- the one
-# that likewise changes nothing about how the foot rolls -- is to let the toe
-# ball follow the toes.
+# The heel ball sits on calcn and the toe ball on toes. The .hfd puts both on
+# calcn, but its own comment says why that was free -- "the mtp joint here is
+# locked 0..0 anyway, so this changes nothing kinematically". Here mtp is live
+# with muscles crossing it, so the equivalent choice is to follow the toes.
 BALL_CONTACTS = {
-    "heel_r": ("calcn_r", (+0.05562, +0.00954, +0.01421)),
-    "toe_r": ("toes_r", (+0.05718, +0.01003, +0.01353)),
-    "heel_l": ("calcn_l", (+0.04734, +0.00395, +0.00902)),
-    "toe_l": ("toes_l", (+0.05636, +0.01315, -0.01354)),
+    "heel_r": ("calcn_r", (+0.055194, +0.010372, +0.020376)),
+    "toe_r": ("toes_r", (+0.057671, +0.009030, +0.009809)),
+    "heel_l": ("calcn_l", (+0.055194, +0.010372, -0.020376)),
+    "toe_l": ("toes_l", (+0.057671, +0.009030, -0.009809)),
 }
 
-# One ball each, so the heel/toe split in contact_loads() is exact rather than
-# a grouping of capsules.
 HEEL_GEOMS = {"calcn_r": ("heel_r",), "calcn_l": ("heel_l",)}
 TOE_GEOMS = {"calcn_r": ("toe_r",), "calcn_l": ("toe_l",)}
-
-# The stock MyoSuite grouping, used when ball_contacts=False so the two
-# contact models can be compared. The rear group is on the calcn and the
-# forward group on the toes; `*_foot_col3` is the rearmost.
-MYO_HEEL_GEOMS = {
-    "calcn_r": ("r_foot_col1", "r_foot_col3", "r_foot_col4"),
-    "calcn_l": ("l_foot_col1", "l_foot_col3", "l_foot_col4"),
-}
-MYO_TOE_GEOMS = {
-    "calcn_r": ("r_bofoot_col1", "r_bofoot_col2"),
-    "calcn_l": ("l_bofoot_col1", "l_bofoot_col2"),
-}
-
-PELVIS_BODY = "pelvis"
-TORSO_BODY = "torso"
-HEAD_BODY = "head"
-HIP_BODIES = ("femur_r", "femur_l")
-ROOT_JOINT = "root"
-
-WORLD_UP = np.array([0.0, 0.0, 1.0])
-
-# Posture is derived from body *positions*, not from a body frame's axes.
-#
-# This model's world is z-up but its body frames are locally y-up -- the torso
-# frame's own +y is what points at the sky, a leftover of the OpenSim
-# convention the model was converted from. Reading a fixed local axis as
-# "up" therefore gives nonsense (the first version of this file measured a
-# 89-degree trunk tilt on a model standing perfectly straight, and every
-# episode terminated on step 1).
-#
-# The pelvis-to-head vector and the hip-to-hip vector are unambiguous whatever
-# the frame convention, so posture and heading are measured from those.
 
 
 def _default_model_path() -> Path:
@@ -163,15 +163,12 @@ def _default_model_path() -> Path:
 
     return (
         Path(myosuite.__file__).resolve().parent
-        / "simhive"
-        / "myo_sim"
-        / "body"
-        / "myobody.xml"
+        / "simhive" / "myo_sim" / "body" / "myobody.xml"
     )
 
 
 class MyoLocomotionEnv(gym.Env):
-    """One environment class for the whole muscle-locomotion curriculum."""
+    """One environment class for the whole planar muscle-locomotion curriculum."""
 
     metadata = {"render_modes": ["rgb_array", "human"], "render_fps": 100}
 
@@ -179,7 +176,6 @@ class MyoLocomotionEnv(gym.Env):
         self,
         stage: str = "A",
         model_path=None,
-        ball_contacts: bool = True,
         frame_skip: int = 10,
         include_prev_action: bool = True,
         include_activation: bool = True,
@@ -195,13 +191,9 @@ class MyoLocomotionEnv(gym.Env):
         if not path.is_file():
             raise FileNotFoundError("model not found: %s" % path)
         self.model_path = path
-        self.ball_contacts = bool(ball_contacts)
-        self.heel_geoms = HEEL_GEOMS if self.ball_contacts else MYO_HEEL_GEOMS
-        self.toe_geoms = TOE_GEOMS if self.ball_contacts else MYO_TOE_GEOMS
-        self.model = self._build_model(path, self.ball_contacts)
+        self.model = self._build_model(path)
         self.data = mujoco.MjData(self.model)
 
-        # Let render() ask for a sensible size without editing the XML.
         self.model.vis.global_.offwidth = max(self.model.vis.global_.offwidth, 1280)
         self.model.vis.global_.offheight = max(self.model.vis.global_.offheight, 960)
 
@@ -212,23 +204,13 @@ class MyoLocomotionEnv(gym.Env):
 
         self._include_prev_action = bool(include_prev_action)
         self._include_activation = bool(include_activation)
-
         self.n_act = int(self.model.nu)
         self.prev_action = np.zeros(self.n_act, dtype=np.float32)
 
         self._validate_model()
         self._resolve_indices()
-
         self.body_weight = float(self.model.body_mass.sum()) * GRAVITY
 
-        # Reset-time reference frame; re-measured on every reset.
-        self._forward_ref = np.array([1.0, 0.0, 0.0])
-        self._right_ref = np.array([0.0, -1.0, 0.0])
-        self._heading_ref = 0.0
-
-        # Settle the model once so height and posture are measured against a
-        # pose the physics actually supports, rather than against the keyframe,
-        # whose toes penetrate the floor by about a centimetre.
         self.stance_residual = float("nan")
         self.seat_residual = float("nan")
         self._neutral_qpos, self._neutral_height = self._solve_stance_pose()
@@ -256,107 +238,129 @@ class MyoLocomotionEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=obs.shape, dtype=np.float32
         )
 
-    # -- model introspection ---------------------------------------------
+    # -- model construction ------------------------------------------------
 
     @staticmethod
-    def _build_model(path, ball_contacts: bool):
-        """Compile the model, swapping the foot contact for two balls per foot.
+    def _build_model(path):
+        """Compile a planar, two-ball-contact version of the model.
 
         Done through MjSpec rather than by editing a copy of MyoSuite's XML,
         so there is no second model file to keep in step with the package and
         no mesh paths to rewrite.
         """
-        if not ball_contacts:
-            return mujoco.MjModel.from_xml_path(str(path))
-
         spec = mujoco.MjSpec.from_file(str(path))
-        by_geom = {g.name: g for g in spec.geoms}
-        missing = [n for n in MYO_FOOT_GEOMS if n not in by_geom]
+
+        root = spec.joints[0]
+        if root.type != mujoco.mjtJoint.mjJNT_FREE:
+            raise RuntimeError(
+                "expected %s to start with a free root joint, found %r"
+                % (Path(path).name, str(root.type))
+            )
+        root_body = root.parent
+        spec.delete(root)
+        # The keyframe's qpos was sized for the free root and no longer fits.
+        for key in list(spec.keys):
+            spec.delete(key)
+        for name, jtype, axis in ROOT_SPEC:
+            joint = root_body.add_joint()
+            joint.name, joint.type, joint.axis = name, jtype, list(axis)
+
+        present = {j.name for j in spec.joints}
+        missing = [n for n in OUT_OF_PLANE_JOINTS if n not in present]
         if missing:
             raise RuntimeError(
-                "%s does not have the MyoSuite foot geoms this env expects to "
-                "replace: %s" % (Path(path).name, ", ".join(missing))
+                "%s is missing out-of-plane joints this env pins: %s"
+                % (Path(path).name, ", ".join(missing))
+            )
+        for name in OUT_OF_PLANE_JOINTS:
+            eq = spec.add_equality()
+            eq.type = mujoco.mjtEq.mjEQ_JOINT
+            eq.name1 = name
+            eq.name2 = ""
+            eq.data = [0.0] * len(eq.data)
+
+        by_geom = {g.name: g for g in spec.geoms}
+        absent = [n for n in MYO_FOOT_GEOMS if n not in by_geom]
+        if absent:
+            raise RuntimeError(
+                "%s does not have the MyoSuite foot geoms this env replaces: %s"
+                % (Path(path).name, ", ".join(absent))
             )
         for name in MYO_FOOT_GEOMS:
             geom = by_geom[name]
             geom.contype = 0
             geom.conaffinity = 0
-            geom.group = 1  # keep it visible, just not collidable
+            geom.group = 1  # still drawn, just not collidable
 
         by_body = {b.name: b for b in spec.bodies}
-        for name, (body, pos) in BALL_CONTACTS.items():
-            if body not in by_body:
-                raise RuntimeError("body %r not found for contact ball %r" % (body, name))
-            ball = by_body[body].add_geom()
+        for name, (parent, pos) in BALL_CONTACTS.items():
+            if parent not in by_body:
+                raise RuntimeError(
+                    "body %r not found for contact ball %r" % (parent, name)
+                )
+            ball = by_body[parent].add_geom()
             ball.name = name
             ball.type = mujoco.mjtGeom.mjGEOM_SPHERE
             ball.size = [BALL_RADIUS, 0.0, 0.0]
             ball.pos = list(pos)
-            # Massless, like the .hfd's contact spheres. Left at the default
-            # density these four balls added 0.3 kg and shifted the feet's
-            # inertia, which is not what a contact primitive should do.
-            ball.density = 0.0
             ball.contype = 1
             ball.conaffinity = 1
-            # Group 4 is where MyoSuite keeps its collision geometry, so the
-            # balls are hidden by default and shown by the same toggle.
+            # Group 4 is MyoSuite's collision group, so one toggle shows them.
             ball.group = 4
-            ball.rgba = [0.9, 0.5, 0.2, 0.7]
+            # Massless, like the .hfd's contact spheres. At MuJoCo's default
+            # density these four added 0.3 kg and shifted the feet's inertia.
+            ball.density = 0.0
+            ball.rgba = [0.9, 0.5, 0.2, 0.9]
         return spec.compile()
+
+    def _validate_model(self) -> None:
+        m = self.model
+        n_muscle = int((m.actuator_gaintype == mujoco.mjtGain.mjGAIN_MUSCLE).sum())
+        if n_muscle == 0:
+            raise RuntimeError(
+                "%s has no muscle actuators -- this environment is for "
+                "muscle-actuated models." % self.model_path.name
+            )
+        if m.na != n_muscle:
+            warnings.warn(
+                "expected one activation state per muscle, got na=%d for %d muscles"
+                % (m.na, n_muscle),
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        self.n_muscle = n_muscle
 
     def _resolve_indices(self) -> None:
         m = self.model
-        self.joint_qpos_adr: List[int] = []
-        self.joint_dof_adr: List[int] = []
-        missing = []
-        for name in INDEPENDENT_JOINTS:
+
+        def joint_id(name):
             jid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, name)
             if jid < 0:
-                missing.append(name)
-                continue
-            self.joint_qpos_adr.append(int(m.jnt_qposadr[jid]))
-            self.joint_dof_adr.append(int(m.jnt_dofadr[jid]))
-        if missing:
-            raise RuntimeError(
-                "model %s is missing expected joints: %s"
-                % (self.model_path.name, ", ".join(missing))
-            )
+                raise RuntimeError("model is missing joint %r" % name)
+            return jid
 
-        root = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, ROOT_JOINT)
-        if root < 0 or m.jnt_type[root] != mujoco.mjtJoint.mjJNT_FREE:
-            raise RuntimeError("expected a free root joint named %r" % ROOT_JOINT)
-        self.root_qpos_adr = int(m.jnt_qposadr[root])
-        self.root_dof_adr = int(m.jnt_dofadr[root])
+        names = ROOT_JOINTS + INDEPENDENT_JOINTS
+        self.qadr = {n: int(m.jnt_qposadr[joint_id(n)]) for n in names}
+        self.dadr = {n: int(m.jnt_dofadr[joint_id(n)]) for n in names}
+        self.joint_qpos_adr = [self.qadr[n] for n in INDEPENDENT_JOINTS]
+        self.joint_dof_adr = [self.dadr[n] for n in INDEPENDENT_JOINTS]
+        self.root_dof_adr = [self.dadr[n] for n in ROOT_JOINTS]
 
-        self.pelvis_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, PELVIS_BODY)
-        self.torso_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, TORSO_BODY)
-        self.head_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, HEAD_BODY)
-        self.hip_ids = [
-            mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, n) for n in HIP_BODIES
-        ]
-        self.foot_ids = [
-            mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, n) for n in FOOT_BODIES
-        ]
-        required = {
-            PELVIS_BODY: self.pelvis_id,
-            TORSO_BODY: self.torso_id,
-            HEAD_BODY: self.head_id,
-        }
-        required.update(dict(zip(HIP_BODIES, self.hip_ids)))
-        required.update(dict(zip(FOOT_BODIES, self.foot_ids)))
-        absent = sorted(n for n, i in required.items() if i < 0)
-        if absent:
-            raise RuntimeError(
-                "model %s is missing bodies this env needs: %s"
-                % (self.model_path.name, ", ".join(absent))
-            )
+        def body_id(name):
+            bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, name)
+            if bid < 0:
+                raise RuntimeError("model is missing body %r" % name)
+            return bid
 
-        # Geoms belonging to each foot subtree, for per-foot contact force.
-        # Geom ids per load group, ordered heel_r, toe_r, heel_l, toe_l to
-        # match contact_loads().
+        self.pelvis_id = body_id(PELVIS_BODY)
+        self.torso_id = body_id(TORSO_BODY)
+        self.head_id = body_id(HEAD_BODY)
+        self.foot_ids = [body_id(n) for n in FOOT_BODIES]
+
+        # Geom ids per load group, ordered heel_r, toe_r, heel_l, toe_l.
         self._load_groups: List[set] = []
         for foot in FOOT_BODIES:
-            for table in (self.heel_geoms, self.toe_geoms):
+            for table in (HEEL_GEOMS, TOE_GEOMS):
                 ids = set()
                 for gname in table[foot]:
                     g = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, gname)
@@ -365,396 +369,45 @@ class MyoLocomotionEnv(gym.Env):
                     ids.add(g)
                 self._load_groups.append(ids)
 
-        self.foot_geoms: List[set] = []
-        for bid in self.foot_ids:
-            ids = set()
-            for g in range(m.ngeom):
-                b = int(m.geom_bodyid[g])
-                # include the toes, which hang off the calcn
-                while b > 0:
-                    if b == bid:
-                        ids.add(g)
-                        break
-                    b = int(m.body_parentid[b])
-            self.foot_geoms.append(ids)
-
-    def _validate_model(self) -> None:
-        """Fail loudly if the model is not the one this env was written for."""
-        m = self.model
-        n_muscle = int(
-            (m.actuator_gaintype == mujoco.mjtGain.mjGAIN_MUSCLE).sum()
-        )
-        if n_muscle == 0:
-            raise RuntimeError(
-                "%s has no muscle actuators -- this environment is for "
-                "muscle-actuated models. Did you point it at a torque model?"
-                % self.model_path.name
-            )
-        if n_muscle != m.nu:
-            warnings.warn(
-                "%d of %d actuators are muscles; the rest are treated as "
-                "activations in [0, 1] too, which may not be what their "
-                "ctrlrange means." % (n_muscle, m.nu),
-                RuntimeWarning,
-                stacklevel=3,
-            )
-        if m.na != n_muscle:
-            warnings.warn(
-                "expected one activation state per muscle, got na=%d for %d "
-                "muscles" % (m.na, n_muscle),
-                RuntimeWarning,
-                stacklevel=3,
-            )
-        self.n_muscle = n_muscle
-
-    # -- the standing stance ----------------------------------------------
-
-    # Joints the stance solve may move, against the residuals it drives to
-    # zero: four foot heights, two COM-over-base offsets and two
-    # trunk-verticality components, with pelvis height, root pitch and root
-    # roll as three further unknowns.
-    _STANCE_VARS = (
-        "hip_flexion_r", "knee_angle_r", "ankle_angle_r", "hip_adduction_r",
-        "hip_flexion_l", "knee_angle_l", "ankle_angle_l", "hip_adduction_l",
-        "flex_extension", "lat_bending",
-    )
-    _STANCE_ZERO = (
-        "hip_rotation_r", "hip_rotation_l",
-        "subtalar_angle_r", "subtalar_angle_l", "mtp_angle_r", "mtp_angle_l",
-        "axial_rotation",
-    )
-
-    def foot_stagger(self) -> float:
-        """Fore-aft offset between the two feet, in metres.
-
-        Zero is a parallel standing stance. Also constrained by the solve:
-        left free it settled on a 0.110 m split stance, which loads the feet
-        diagonally -- one heel and the opposite toe -- and left the other heel
-        touching the floor with no force at all on every reset.
-        """
-        forward = self.forward_axis()
-        delta = np.asarray(self.data.xipos[self.foot_ids[0]]) - np.asarray(
-            self.data.xipos[self.foot_ids[1]]
-        )
-        return float(delta @ forward)
-
-    def stance_width(self) -> float:
-        """Lateral distance between the two feet, in metres.
-
-        Constrained by the stance solve because nothing else stops the legs
-        crossing. With hip_adduction pinned to zero the solved stance put the
-        feet 0.055 m apart -- narrower than one foot is wide -- and MyoSuite's
-        foot-to-foot collision pair then fired with 569 N of spurious force,
-        which swamped the real ground reaction and starved one heel of load.
-        """
-        right = self.right_axis()
-        delta = np.asarray(self.data.xipos[self.foot_ids[0]]) - np.asarray(
-            self.data.xipos[self.foot_ids[1]]
-        )
-        return float(delta @ right)
-
-    def _support_centroid(self) -> np.ndarray:
-        """Horizontal centre of the base of support.
-
-        The mean of the four contact groups' geom positions -- heel and toe of
-        each foot -- rather than the midpoint of the two calcn bodies. The
-        calcn COM sits forward of the foot's true support area, so balancing
-        the body COM over it left the model pitching onto its toes and
-        unloading both heels within four steps.
-        """
-        pts = []
-        for group in self._load_groups:
-            for g in group:
-                pts.append(np.asarray(self.data.geom_xpos[g]))
-        return np.mean(pts, axis=0)
-
-    def _geom_lowest_z(self, name: str) -> float:
-        """World z of the lowest point of a contact geom."""
-        g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
-        if g < 0:
-            raise RuntimeError("contact geom %r not found" % name)
-        size = self.model.geom_size[g]
-        radius = (
-            float(size.min())
-            if self.model.geom_type[g] == mujoco.mjtGeom.mjGEOM_ELLIPSOID
-            else float(size[0])
-        )
-        return float(self.data.geom_xpos[g][2] - radius)
-
-    def _heel_z(self, foot: str) -> float:
-        return min(self._geom_lowest_z(n) for n in self.heel_geoms[foot])
-
-    def _toe_z(self, foot: str) -> float:
-        return min(self._geom_lowest_z(n) for n in self.toe_geoms[foot])
-
-    _SEAT_VARS = (
-        "hip_flexion_r", "knee_angle_r", "ankle_angle_r", "hip_adduction_r",
-        "hip_flexion_l", "knee_angle_l", "ankle_angle_l", "hip_adduction_l",
-    )
-
-    def _seat_feet(self, iterations: int = 60) -> None:
-        """Put both heels and both toes back on the floor after randomisation.
-
-        Reset perturbs the independent joints, which breaks the stance solve in
-        two ways: tilting a foot about its ankle lifts the heel (0.02 rad moves
-        a 0.2 m foot by 4 mm), and perturbing a hip or knee changes that leg's
-        length and lifts the whole foot, by up to 30 mm in practice.
-
-        Solving each leg on its own is not enough. The knee's lower limit is
-        full extension, so once a leg is straight it cannot lengthen further,
-        and the per-leg Newton stalls a millimetre or two short however many
-        iterations it is given. The pelvis has to move too.
-
-        So this shares the stance solve's unknowns -- six leg angles plus
-        pelvis height and a root pitch/roll delta -- against six residuals:
-        four foot heights and the two horizontal offsets of the COM from the
-        base of support. Nine unknowns, six constraints, solved least-norm, so
-        the seating disturbs the randomised pose as little as it can while
-        guaranteeing the model starts balanced with both feet flat.
-
-        The trunk joints keep whatever randomisation gave them; what it cannot
-        do is take a foot off the ground or put the COM outside the base, which
-        for a standing reset are the right constraints.
-        """
-        m, d = self.model, self.data
-        adr, lim = [], []
-        for joint in self._SEAT_VARS:
-            jid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, joint)
-            adr.append(int(m.jnt_qposadr[jid]))
-            lim.append(m.jnt_range[jid])
-        n_var = len(self._SEAT_VARS)
-        lo_b = np.array([l[0] for l in lim])
-        hi_b = np.array([l[1] for l in lim])
-        base_quat = d.qpos[3:7].copy()
-
-        def residual(x):
-            for a, v, (lo, hi) in zip(adr, x[:n_var], lim):
-                d.qpos[a] = float(np.clip(v, lo, hi))
-            d.qpos[2] = x[n_var]
-            q = base_quat.copy()
-            for angle, axis in (
-                (x[n_var + 1], (0.0, 1.0, 0.0)),
-                (x[n_var + 2], (1.0, 0.0, 0.0)),
-            ):
-                dq = np.array(
-                    [np.cos(angle / 2.0), *(np.sin(angle / 2.0) * np.asarray(axis))]
-                )
-                out = np.zeros(4)
-                mujoco.mju_mulQuat(out, dq, q)
-                q = out
-            d.qpos[3:7] = q
-            mujoco.mj_forward(m, d)
-            com = np.asarray(d.subtree_com[0])
-            mid = self._support_centroid()
-            return np.array([
-                self._heel_z("calcn_r"), self._toe_z("calcn_r"),
-                self._heel_z("calcn_l"), self._toe_z("calcn_l"),
-                com[0] - mid[0], com[1] - mid[1],
-                self.stance_width() - self.stage_spec.stance_width,
-                self.foot_stagger(),
-            ])
-
-        x = np.concatenate([[d.qpos[a] for a in adr], [d.qpos[2]], [0.0, 0.0]])
-        for _ in range(iterations):
-            r = residual(x)
-            if np.abs(r).max() < 1e-7:
-                break
-            jac = np.zeros((r.size, x.size))
-            eps = 1e-5
-            for k in range(x.size):
-                xp = x.copy()
-                xp[k] += eps
-                jac[:, k] = (residual(xp) - r) / eps
-            step = -np.linalg.solve(jac.T @ jac + 1e-9 * np.eye(x.size), jac.T @ r)
-            norm = np.linalg.norm(step)
-            if norm > 0.05:
-                step *= 0.05 / norm
-            x = x + step
-            x[:n_var] = np.clip(x[:n_var], lo_b, hi_b)
-        self.seat_residual = float(np.abs(residual(x)).max())
-
-    def _solve_stance_pose(self):
-        """Solve for a plantigrade, balanced, upright standing pose.
-
-        The shipped keyframe is a mid-stride pose, not a stance: the hips
-        differ by 0.43 rad, hip_rotation_r is -35 degrees, the feet are 0.23 m
-        apart along the facing direction and the trunk is flexed 30 degrees.
-        Dropping the model from it lands it on its toes with both heels in the
-        air -- a bad place to start a locomotion curriculum. It is
-        near-singular, it biases the ankle plantarflexors from step one, and it
-        leaves no heel contact for a gait reward to read.
-
-        A symmetric pose cannot fix it either. With identical joint angles and
-        level hips the right femur is 23.5 mm shorter than the left, so one
-        foot is always off the ground. The solve therefore treats the legs
-        independently and lets lat_bending absorb the difference, which is what
-        a person with a leg-length discrepancy does.
-
-        Residuals, driven to zero by damped Gauss-Newton:
-
-          * each foot's heel and toe both at z = 0  (plantigrade, both feet)
-          * the COM horizontally over the midpoint of the feet  (balanced)
-          * the trunk axis vertical  (upright)
-
-        Returns (qpos, pelvis_height), and raises rather than quietly handing
-        back a pose that is none of those things.
-        """
-        m, d = self.model, self.data
-        names = self._STANCE_VARS + self._STANCE_ZERO
-        qadr = {
-            n: int(m.jnt_qposadr[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)])
-            for n in names
-        }
-        limits = [
-            m.jnt_range[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)]
-            for n in self._STANCE_VARS
-        ]
-        n_var = len(self._STANCE_VARS)
-        upright = np.array([1.0, 0.0, 0.0, 0.0])
-
-        mujoco.mj_resetDataKeyframe(m, d, 0)
-        for n in self._STANCE_ZERO:
-            d.qpos[qadr[n]] = 0.0
-        d.qvel[:] = 0.0
-
-        def residual(x):
-            for n, v, (lo, hi) in zip(self._STANCE_VARS, x[:n_var], limits):
-                d.qpos[qadr[n]] = float(np.clip(v, lo, hi))
-            d.qpos[2] = x[n_var]
-            q = upright.copy()
-            for angle, axis in (
-                (x[n_var + 1], (0.0, 1.0, 0.0)),
-                (x[n_var + 2], (1.0, 0.0, 0.0)),
-            ):
-                dq = np.array(
-                    [np.cos(angle / 2.0), *(np.sin(angle / 2.0) * np.asarray(axis))]
-                )
-                out = np.zeros(4)
-                mujoco.mju_mulQuat(out, dq, q)
-                q = out
-            d.qpos[3:7] = q
-            mujoco.mj_forward(m, d)
-            com = np.asarray(d.subtree_com[0])
-            mid = self._support_centroid()
-            up = self.trunk_axis()
-            return np.array([
-                self._heel_z("calcn_r"), self._toe_z("calcn_r"),
-                self._heel_z("calcn_l"), self._toe_z("calcn_l"),
-                com[0] - mid[0], com[1] - mid[1],
-                up[0], up[1],
-                self.stance_width() - self.stage_spec.stance_width,
-                self.foot_stagger(),
-            ])
-
-        x = np.zeros(n_var + 3)
-        x[self._STANCE_VARS.index("knee_angle_r")] = 0.10
-        x[self._STANCE_VARS.index("knee_angle_l")] = 0.10
-        x[self._STANCE_VARS.index("hip_adduction_r")] = -0.05
-        x[self._STANCE_VARS.index("hip_adduction_l")] = -0.05
-        x[n_var] = 0.95
-        lo_b = np.array([l[0] for l in limits])
-        hi_b = np.array([l[1] for l in limits])
-
-        # Two passes: the four foot residuals first, then all eight. Starting
-        # the full solve from a pose whose feet are already flat is what makes
-        # it converge; from the keyframe the COM and foot residuals pull
-        # against each other and it wanders into the joint limits instead.
-        for n_res in (4, 10):
-            for _ in range(200):
-                r = residual(x)[:n_res]
-                if np.abs(r).max() < 1e-7:
-                    break
-                jac = np.zeros((n_res, x.size))
-                eps = 1e-5
-                for k in range(x.size):
-                    xp = x.copy()
-                    xp[k] += eps
-                    jac[:, k] = (residual(xp)[:n_res] - r) / eps
-                step = -np.linalg.solve(
-                    jac.T @ jac + 1e-9 * np.eye(x.size), jac.T @ r
-                )
-                norm = np.linalg.norm(step)
-                if norm > 0.05:
-                    step *= 0.05 / norm
-                x = x + step
-                x[:n_var] = np.clip(x[:n_var], lo_b, hi_b)
-
-        r = residual(x)
-        worst = float(np.abs(r).max())
-        if worst > 1e-4:
-            raise RuntimeError(
-                "could not solve a plantigrade standing stance for %s "
-                "(worst residual %.2e). The model's foot geometry or joint "
-                "ranges may differ from what this env expects."
-                % (self.model_path.name, worst)
-            )
-        self.stance_residual = worst
-        return d.qpos.copy(), float(d.xipos[self.pelvis_id][2])
-
-    # -- observation -------------------------------------------------------
+    # -- measurement -------------------------------------------------------
 
     @property
     def pelvis_height(self) -> float:
         return float(self.data.xipos[self.pelvis_id][2])
 
     def trunk_axis(self) -> np.ndarray:
-        """Unit vector from the pelvis COM to the head COM."""
-        v = np.asarray(self.data.xipos[self.head_id]) - np.asarray(
+        """Unit vector from the pelvis COM to the torso COM.
+
+        Derived from positions rather than a body frame's axes: this model's
+        world is z-up but its body frames are locally y-up, a leftover of the
+        OpenSim conversion, so reading a fixed local axis as "up" gives
+        nonsense. The torso is used rather than the head because the head
+        geometry sits 87 mm off-centre.
+        """
+        v = np.asarray(self.data.xipos[self.torso_id]) - np.asarray(
             self.data.xipos[self.pelvis_id]
         )
         n = np.linalg.norm(v)
         return v / n if n > 1e-9 else WORLD_UP.copy()
 
     def trunk_tilt(self) -> float:
-        """Angle between the trunk axis and world vertical, in radians.
-
-        About 0.14 rad on the settled standing pose.
-        """
+        """Angle between the trunk axis and vertical, in radians."""
         return float(np.arccos(np.clip(float(self.trunk_axis() @ WORLD_UP), -1.0, 1.0)))
-
-    def right_axis(self) -> np.ndarray:
-        """Horizontal unit vector pointing to the model's right, from the hips."""
-        v = np.asarray(self.data.xipos[self.hip_ids[0]]) - np.asarray(
-            self.data.xipos[self.hip_ids[1]]
-        )
-        v = np.array([v[0], v[1], 0.0])
-        n = np.linalg.norm(v)
-        return v / n if n > 1e-9 else np.array([0.0, -1.0, 0.0])
-
-    def forward_axis(self) -> np.ndarray:
-        """Horizontal unit vector the model currently faces."""
-        return np.cross(WORLD_UP, self.right_axis())
-
-    def heading(self) -> float:
-        """Current facing direction as a yaw angle, in radians."""
-        f = self.forward_axis()
-        return float(np.arctan2(f[1], f[0]))
-
-    def heading_error(self) -> float:
-        """Signed yaw away from the direction faced at reset, wrapped to +-pi.
-
-        Measured against the reset heading rather than world +x, because this
-        model's neutral pose faces about 109 degrees and "walk forward" means
-        the way it started, not the way the world axes happen to point.
-        """
-        err = self.heading() - self._heading_ref
-        return float((err + np.pi) % (2.0 * np.pi) - np.pi)
-
-    def planar_velocity(self) -> Tuple[float, float]:
-        """COM velocity resolved into (forward, lateral) at the reset heading."""
-        v = self.com_velocity()
-        return float(v @ self._forward_ref), float(v @ self._right_ref)
 
     def com_velocity(self) -> np.ndarray:
         mujoco.mj_subtreeVel(self.model, self.data)
         return np.asarray(self.data.subtree_linvel[0]).copy()
 
+    def forward_velocity(self) -> float:
+        """Forward COM speed. In a planar model this is simply +x."""
+        return float(self.com_velocity()[0])
+
     def contact_loads(self) -> np.ndarray:
         """Vertical load on [heel_r, toe_r, heel_l, toe_l], as a fraction of BW.
 
         Heel and toe are kept apart because the difference between them is
-        gait phase -- heel strike loads the rear group, toe-off the forward
-        one -- and a single per-foot total cannot tell those apart.
+        gait phase -- heel strike loads the rear ball, toe-off the forward one
+        -- and a single per-foot total cannot tell those apart.
         """
         out = np.zeros(4)
         buf = np.zeros(6)
@@ -781,39 +434,200 @@ class MyoLocomotionEnv(gym.Env):
         loads = self.contact_loads()
         return np.array([loads[0], loads[2]])
 
+    def _geom_lowest_z(self, name: str) -> float:
+        g = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        if g < 0:
+            raise RuntimeError("contact geom %r not found" % name)
+        size = self.model.geom_size[g]
+        radius = (
+            float(size.min())
+            if self.model.geom_type[g] == mujoco.mjtGeom.mjGEOM_ELLIPSOID
+            else float(size[0])
+        )
+        return float(self.data.geom_xpos[g][2] - radius)
+
+    def _heel_z(self, foot: str) -> float:
+        return min(self._geom_lowest_z(n) for n in HEEL_GEOMS[foot])
+
+    def _toe_z(self, foot: str) -> float:
+        return min(self._geom_lowest_z(n) for n in TOE_GEOMS[foot])
+
+    def _support_centroid(self) -> np.ndarray:
+        """Horizontal centre of the base of support.
+
+        The mean of the four contact balls, not the midpoint of the two calcn
+        bodies: the calcn COM sits forward of the foot's real support area, so
+        balancing over it leaves the model pitching onto its toes.
+        """
+        pts = [
+            np.asarray(self.data.geom_xpos[g])
+            for group in self._load_groups
+            for g in group
+        ]
+        return np.mean(pts, axis=0)
+
+    def foot_stagger(self) -> float:
+        """Fore-aft offset between the two feet. Zero is a parallel stance."""
+        delta = np.asarray(self.data.xipos[self.foot_ids[0]]) - np.asarray(
+            self.data.xipos[self.foot_ids[1]]
+        )
+        return float(delta @ FORWARD)
+
+    # -- the standing stance ----------------------------------------------
+
+    _STANCE_VARS = ("hip_flexion", "knee_angle", "ankle_angle")
+
+    def _solve_stance_pose(self):
+        """Solve for a plantigrade, balanced, upright standing pose.
+
+        The model ships with a mid-stride keyframe rather than a stance, and
+        that keyframe is dropped when the free root is replaced, so the pose
+        has to be constructed. It is solved **symmetrically** -- one set of leg
+        angles applied to both legs -- because the model is exactly
+        left/right symmetric, which a test pins.
+
+        Residuals, driven to zero by damped Gauss-Newton:
+
+          * the heel and toe of one foot at z = 0 (plantigrade; symmetry gives
+            the other foot for free)
+          * the COM horizontally over the base of support (balanced)
+          * the trunk axis vertical (upright)
+
+        Unknowns: hip, knee and ankle angle, pelvis height, pelvis tilt and
+        trunk flexion -- six against four, solved least-norm.
+        """
+        m, d = self.model, self.data
+        mujoco.mj_resetData(m, d)
+
+        def residual(x):
+            for side in ("r", "l"):
+                for name, value in zip(self._STANCE_VARS, x[:3]):
+                    d.qpos[self.qadr["%s_%s" % (name, side)]] = float(value)
+            d.qpos[self.qadr["pelvis_ty"]] = x[3]
+            d.qpos[self.qadr["pelvis_tilt"]] = x[4]
+            d.qpos[self.qadr["flex_extension"]] = x[5]
+            mujoco.mj_forward(m, d)
+            com = np.asarray(d.subtree_com[0])
+            base = self._support_centroid()
+            return np.array([
+                self._heel_z("calcn_r"),
+                self._toe_z("calcn_r"),
+                com[0] - base[0],
+                float(self.trunk_axis() @ FORWARD),
+            ])
+
+        x = np.array([0.0, 0.10, 0.0, 0.0, 0.0, 0.0])
+        for _ in range(300):
+            r = residual(x)
+            if np.abs(r).max() < 1e-10:
+                break
+            jac = np.zeros((r.size, x.size))
+            eps = 1e-6
+            for k in range(x.size):
+                xp = x.copy()
+                xp[k] += eps
+                jac[:, k] = (residual(xp) - r) / eps
+            step = -np.linalg.solve(jac.T @ jac + 1e-10 * np.eye(x.size), jac.T @ r)
+            norm = np.linalg.norm(step)
+            if norm > 0.05:
+                step *= 0.05 / norm
+            x = x + step
+
+        r = residual(x)
+        worst = float(np.abs(r).max())
+        if worst > 1e-5:
+            raise RuntimeError(
+                "could not solve a plantigrade standing stance for %s "
+                "(worst residual %.2e)." % (self.model_path.name, worst)
+            )
+        self.stance_residual = worst
+        return d.qpos.copy(), float(d.xipos[self.pelvis_id][2])
+
+    def _seat_feet(self, iterations: int = 60) -> None:
+        """Put both heels and both toes back on the floor after randomisation.
+
+        Reset perturbs the independent joints, which lifts the feet two ways:
+        tilting a foot about its ankle raises the heel (0.02 rad moves a 0.2 m
+        foot by 4 mm), and perturbing a hip or knee changes that leg's length
+        and lifts the whole foot. Each leg is projected back onto "heel and toe
+        at z = 0" through its own hip, knee and ankle -- three unknowns against
+        two constraints, solved least-norm so the seating disturbs the
+        randomised pose as little as it can.
+        """
+        m, d = self.model, self.data
+        worst = 0.0
+        for foot, joints in LEG_JOINTS.items():
+            adr = [self.qadr[n] for n in joints]
+            lim = [
+                m.jnt_range[mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)]
+                for n in joints
+            ]
+            lo_b = np.array([l[0] for l in lim])
+            hi_b = np.array([l[1] for l in lim])
+
+            def residual(x):
+                for a, v, (lo, hi) in zip(adr, x, lim):
+                    d.qpos[a] = float(np.clip(v, lo, hi))
+                mujoco.mj_forward(m, d)
+                return np.array([self._heel_z(foot), self._toe_z(foot)])
+
+            x = np.array([d.qpos[a] for a in adr], dtype=float)
+            for _ in range(iterations):
+                r = residual(x)
+                if np.abs(r).max() < 1e-9:
+                    break
+                jac = np.zeros((2, x.size))
+                eps = 1e-6
+                for k in range(x.size):
+                    xp = x.copy()
+                    xp[k] += eps
+                    jac[:, k] = (residual(xp) - r) / eps
+                step = -np.linalg.solve(
+                    jac.T @ jac + 1e-10 * np.eye(x.size), jac.T @ r
+                )
+                norm = np.linalg.norm(step)
+                if norm > 0.05:
+                    step *= 0.05 / norm
+                x = np.clip(x + step, lo_b, hi_b)
+            worst = max(worst, float(np.abs(residual(x)).max()))
+        self.seat_residual = worst
+
+    # -- observation -------------------------------------------------------
+
     def _get_obs(self) -> np.ndarray:
         d, m = self.data, self.model
-        vf, vl = self.planar_velocity()
+        tilt = float(d.qpos[self.qadr["pelvis_tilt"]])
+        com = self.com_velocity()
         parts = [
             [self.pelvis_height],
-            self.trunk_axis(),                     # orientation, no wrap-around
-            [np.sin(self.heading_error()), np.cos(self.heading_error())],
-            d.qvel[self.root_dof_adr : self.root_dof_adr + 6],
+            [np.sin(tilt), np.cos(tilt)],
             d.qpos[self.joint_qpos_adr],
+            d.qvel[self.root_dof_adr],
             d.qvel[self.joint_dof_adr],
-            [vf, vl, float(self.com_velocity()[2])],
+            [com[0], com[2]],
             self.contact_loads(),
         ]
         if self._include_activation:
-            # The 290 muscle activation states. Without these the observation
-            # does not determine the next state; see the module docstring.
             parts.append(d.act[: m.na] if m.na else np.zeros(0))
         if self._include_prev_action:
             parts.append(self.prev_action)
-        return np.concatenate([np.asarray(p, dtype=np.float64).ravel() for p in parts]).astype(
-            np.float32
-        )
+        return np.concatenate(
+            [np.asarray(p, dtype=np.float64).ravel() for p in parts]
+        ).astype(np.float32)
 
     def obs_layout(self) -> List[Tuple[str, int]]:
-        """Names and widths of the observation blocks, in order."""
+        """Names and widths of the observation blocks, in order.
+
+        `pelvis_tx` is deliberately absent: absolute forward position is not
+        part of the task and would let the policy read the episode clock.
+        """
         layout = [
             ("pelvis_height", 1),
-            ("trunk_axis", 3),
-            ("heading_err_sin_cos", 2),
-            ("root_vel", 6),
-            ("joint_q", len(self.joint_qpos_adr)),
-            ("joint_dq", len(self.joint_dof_adr)),
-            ("com_vel_fwd_lat_up", 3),
+            ("pelvis_tilt_sin_cos", 2),
+            ("joint_q", len(INDEPENDENT_JOINTS)),
+            ("root_dq", len(ROOT_JOINTS)),
+            ("joint_dq", len(INDEPENDENT_JOINTS)),
+            ("com_vel_xz", 2),
             ("contact_load_heel_toe", 4),
         ]
         if self._include_activation:
@@ -833,38 +647,22 @@ class MyoLocomotionEnv(gym.Env):
         self.data.qpos[:] = self._neutral_qpos
         self.data.qvel[:] = 0.0
 
-        # Perturb only the independent joints. The constrained ones are left
-        # for mj_forward to resolve from these.
-        for adr in self.joint_qpos_adr:
-            self.data.qpos[adr] += self.rng.normal(0.0, spec.reset_position_std)
-        for adr in self.joint_dof_adr:
-            self.data.qvel[adr] += self.rng.normal(0.0, spec.reset_velocity_std)
+        for name in INDEPENDENT_JOINTS:
+            self.data.qpos[self.qadr[name]] += self.rng.normal(
+                0.0, spec.reset_position_std
+            )
+            self.data.qvel[self.dadr[name]] += self.rng.normal(
+                0.0, spec.reset_velocity_std
+            )
 
-        # Resolve kinematics before touching the root velocity: the facing
-        # direction is read off body positions, so it needs the pose settled.
         mujoco.mj_forward(self.model, self.data)
-
-        # The stance solve puts both heels and both toes exactly on the floor,
-        # but the randomisation above then tilts the feet: 0.02 rad at the
-        # ankle moves a 0.2 m foot by 4 mm, which is enough to lift a heel off
-        # a perfectly flat solve entirely. Re-flatten each foot through its own
-        # ankle, then re-seat the model vertically. Without this the right heel
-        # carried no load at all on some resets, and penetration on others made
-        # the reset load reach 1.5x body weight.
         self._seat_feet()
-
-        # Freeze the heading the episode starts from. Everything directional --
-        # the velocity, lateral and heading terms -- is measured against this,
-        # so "forward" means the way the model was facing when it started.
-        self._heading_ref = self.heading()
-        self._forward_ref = self.forward_axis()
-        self._right_ref = self.right_axis()
+        lowest = min(
+            min(self._heel_z(foot), self._toe_z(foot)) for foot in FOOT_BODIES
+        )
+        self.data.qpos[self.qadr["pelvis_ty"]] -= lowest
 
         if spec.initial_forward_velocity > 0.0:
-            # Along the model's own facing direction, not world +x. This pose
-            # faces about 109 degrees, so pushing along +x would launch it
-            # mostly sideways -- which is what the first version did, and the
-            # lateral term then punished the env's own initial condition.
             speed = max(
                 0.0,
                 float(
@@ -874,15 +672,12 @@ class MyoLocomotionEnv(gym.Env):
                     )
                 ),
             )
-            self.data.qvel[self.root_dof_adr : self.root_dof_adr + 3] = (
-                speed * self._forward_ref
-            )
+            self.data.qvel[self.dadr["pelvis_tx"]] = speed
 
         if self.model.na:
             self.data.act[:] = spec.initial_activation
         self.data.ctrl[:] = spec.initial_activation
         self.prev_action[:] = 0.0
-
         mujoco.mj_forward(self.model, self.data)
 
         self.steps = 0
@@ -891,7 +686,6 @@ class MyoLocomotionEnv(gym.Env):
         self.reward_breakdown = {}
         for key in self.rwd_dict:
             self.rwd_dict[key] = 0.0
-
         return self._get_obs(), {"curriculum_stage": self.curriculum_stage}
 
     def _rate_limit(self, action) -> np.ndarray:
@@ -907,10 +701,9 @@ class MyoLocomotionEnv(gym.Env):
 
     def step(self, action):
         limited = self._rate_limit(action)
-        # Policy space [-1, 1] -> activation [0, 1]. A zero action is therefore
-        # half activation, not rest.
+        # Policy space [-1, 1] -> activation [0, 1]: a zero action is half
+        # activation, not rest.
         self.data.ctrl[:] = 0.5 * (limited.astype(np.float64) + 1.0)
-
         for _ in range(self.frame_skip):
             mujoco.mj_step(self.model, self.data)
 
@@ -936,17 +729,10 @@ class MyoLocomotionEnv(gym.Env):
         return gaussian(self.trunk_tilt(), self.stage_spec.terms.upright_sigma)
 
     def _term_velocity(self) -> float:
-        forward, _ = self.planar_velocity()
         return gaussian(
-            forward - self.stage_spec.target_vel, self.stage_spec.terms.velocity_sigma
+            self.forward_velocity() - self.stage_spec.target_vel,
+            self.stage_spec.terms.velocity_sigma,
         )
-
-    def _term_lateral(self) -> float:
-        _, lateral = self.planar_velocity()
-        return gaussian(lateral, self.stage_spec.terms.lateral_sigma)
-
-    def _term_heading(self) -> float:
-        return gaussian(self.heading_error(), self.stage_spec.terms.heading_sigma)
 
     def _term_effort(self) -> float:
         """Reward low mean activation, but only above the target budget.
@@ -965,8 +751,6 @@ class MyoLocomotionEnv(gym.Env):
         "height": _term_height,
         "upright": _term_upright,
         "velocity": _term_velocity,
-        "lateral": _term_lateral,
-        "heading": _term_heading,
         "effort": _term_effort,
     }
 
@@ -990,8 +774,6 @@ class MyoLocomotionEnv(gym.Env):
         for key in self.rwd_dict:
             self.rwd_dict[key] = float(breakdown.get(key, 0.0))
         return float(total)
-
-    # -- termination -------------------------------------------------------
 
     def _is_fallen(self) -> bool:
         spec = self.stage_spec
@@ -1028,19 +810,18 @@ class MyoLocomotionEnv(gym.Env):
             self._viewer.close()
             self._viewer = None
 
-    # -- description -------------------------------------------------------
-
     def describe(self) -> str:
         return (
-            "%s | %s | %d muscles, %d independent joints, %.1f kg | "
-            "%s | obs %d, act %d | dt %.3f s"
+            "%s | %s | planar, %d muscles, %d dof (%d root + %d joints), "
+            "%.1f kg | 2 balls/foot | obs %d, act %d | dt %.3f s"
             % (
                 self.curriculum_stage,
                 self.model_path.name,
                 self.n_muscle,
+                len(ROOT_JOINTS) + len(INDEPENDENT_JOINTS),
+                len(ROOT_JOINTS),
                 len(INDEPENDENT_JOINTS),
                 self.body_weight / GRAVITY,
-                "2 contact balls/foot" if self.ball_contacts else "MyoSuite foot contacts",
                 self.observation_space.shape[0],
                 self.n_act,
                 self.dt,

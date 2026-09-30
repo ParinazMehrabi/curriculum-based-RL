@@ -1,8 +1,9 @@
-# Muscle-actuated locomotion (v5)
+# Planar muscle-actuated locomotion (v5)
 
-A full-body **musculoskeletal** locomotion environment on MuJoCo, replacing
-v4's planar 9-torque skeleton with MyoSuite's MyoFullBody model: 26 bodies,
-53 qpos, **290 Hill-type muscles**, 82 kg.
+A **planar** full-body **musculoskeletal** locomotion environment on MuJoCo:
+MyoSuite's MyoFullBody model -- 26 bodies, **290 Hill-type muscles**, 82 kg --
+restructured to move in the sagittal plane only, like the `.hfd` cane model
+this project is built around.
 
 ![the model](figures/myo_model.png)
 
@@ -130,6 +131,101 @@ The policy emits `[-1, 1]` and the environment maps it to activation `[0, 1]`,
 so **a zero action is half activation, not rest.** v4's action rate limiter is
 kept, and `prev_action` stays in the observation for the reason v4 documents.
 
+## Planar, like the `.hfd`
+
+The `.hfd` is a 2-D model: a planar root (`pelvis_tx`, `pelvis_ty`,
+`pelvis_tilt`) and sagittal joints. MyoFullBody ships as a 3-D body with a free
+root, where lateral balance and heading are extra failure modes a policy has to
+solve before it can start walking at all. Removing them is the largest single
+reduction in difficulty available here, and it is what the source model does.
+
+Three changes, applied through `MjSpec` at construction:
+
+| | |
+|---|---|
+| **free root -> three joints** | slide x (forward), slide z (up), hinge y (sagittal pitch), named as in the `.hfd`. No sideways translation, no yaw, no roll. |
+| **8 out-of-plane joints pinned to 0** | hip adduction and rotation, subtalar, lumbar lateral bending and axial rotation -- by equality constraint, so no reference dangles. |
+| **two contact balls per foot** | as in the `.hfd`. See below. |
+
+The eight were measured, not guessed. Perturbing each independent joint by
+0.15 rad and recording how far any body left the sagittal plane:
+
+| joint | out-of-plane displacement |
+|---|---|
+| `hip_adduction_r/l` | 0.127 m |
+| `lat_bending` | 0.089 m |
+| `hip_rotation_r/l` | 0.021 m |
+| `subtalar_angle_r/l` | 0.019 m |
+| `axial_rotation` | 0.015 m |
+| `ankle_angle_r/l` | 0.0046 m |
+| `knee_angle_r/l` | 0.0012 m |
+| `mtp_angle_r/l` | 0.00016 m |
+| `flex_extension` | 0.000003 m |
+
+The clean break falls after `axial_rotation`. Ankle, knee and mtp are left
+free: their residual obliquity is real anatomy, and with a planar root it
+cannot accumulate into lateral motion. What "planar" guarantees here is that
+**the body cannot leave the plane or fall out of it**; individual segments
+still wander up to about 2.7 cm under random full-range activation, far less
+under anything resembling a policy. Projecting those axes onto the sagittal
+plane would make it exactly planar at the cost of the anatomy.
+
+**Twelve independent degrees of freedom** remain: three at the root,
+`flex_extension`, and hip/knee/ankle/mtp per leg. The action space is unchanged
+at 290 muscles, so the model is now far more overactuated relative to its dofs
+than before -- which is the regime DEP-RL was built for.
+
+The `lateral` and `heading` reward terms are gone with the third dimension.
+Both were also satisfied by standing still, so dropping them raises every
+remaining term's exponent in the geometric mean.
+
+### A correction
+
+An earlier version of this package reported the right femur as **23.5 mm
+shorter than the left** and built an asymmetric stance around it, with
+`lat_bending` taking up the difference. That measurement was wrong. It set
+`knee_angle` to -0.05, which is outside that joint's `[0, 2.0944]` range, so
+the knee's coupling polynomials -- which drive `translation1/2` and
+`rotation2/3` -- were evaluated off their domain and returned different
+nonsense per side.
+
+**The model is exactly left/right symmetric**, to floating-point precision.
+`test_model_is_left_right_symmetric` pins it. That is what lets the stance be
+solved symmetrically now: one set of leg angles for both legs, six unknowns
+against four residuals, converging to about `1e-16`.
+
+## The standing stance is solved, not inherited
+
+The model ships with a **mid-stride keyframe rather than a stance** -- hips
+0.43 rad apart, feet 0.23 m apart along the facing direction, trunk flexed
+30 degrees -- and that keyframe is dropped anyway when the free root is
+replaced, so the pose has to be constructed.
+
+`_solve_stance_pose()` solves it by damped Gauss-Newton against:
+
+- the heel **and** toe of one foot at `z = 0` (plantigrade; symmetry gives the
+  other foot for free),
+- the COM horizontally over the **base of support**, and
+- the trunk axis vertical.
+
+Unknowns are hip, knee and ankle angle, pelvis height, pelvis tilt and trunk
+flexion. Six against four, solved least-norm, converging to about `1e-16`.
+
+Reset randomisation then breaks it, two ways: 0.02 rad at the ankle tilts a
+0.2 m foot by 4 mm and lifts the heel, and a hip or knee perturbation moves a
+whole foot. `_seat_feet()` projects each leg back onto "heel and toe at
+`z = 0`" through its own hip, knee and ankle.
+
+Measured over 12 resets: **both heels on the floor every time** (worst gap
+1e-9 m), **both heels carrying load every time**, total contact load
+0.55-0.62 body weights, COM over the base to 6e-4 m. The 3-D version left one
+heel at zero force on most resets -- four coplanar contacts against three
+equilibrium equations is the wobbly-table problem -- and the symmetric planar
+stance is not subject to it.
+
+The heels still unload within a few steps, because the body pitches forward.
+Holding the stance is stage A's job, not the reset's.
+
 ## Foot contact: two balls per foot, as in the cane model
 
 The `.hfd` cane model this project is built around gives each foot exactly two
@@ -184,57 +280,6 @@ asserted.
 And the heels unload within a few steps, because the body pitches forward.
 Holding the stance is stage A's job, not the reset's.
 
-## The standing stance is solved, not inherited
-
-The shipped keyframe is a **mid-stride pose, not a stance**: the hips differ by
-0.43 rad, `hip_rotation_r` is -35 degrees, the feet are 0.23 m apart along the
-facing direction and the trunk is flexed 30 degrees. Dropping the model from it
-lands it **on its toes with both heels 23 mm in the air** -- near-singular,
-biased toward the ankle plantarflexors from step one, and with no heel contact
-for a gait reward to read.
-
-A symmetric pose cannot fix it either. With identical joint angles and level
-hips, the right femur is **23.5 mm shorter than the left**, so one foot is
-always off the ground.
-
-So `_solve_stance_pose()` solves for the stance instead, by damped
-Gauss-Newton over six leg angles, two trunk angles, pelvis height and root
-pitch/roll, against:
-
-- each foot's heel **and** toe at `z = 0` (plantigrade, both feet),
-- the COM horizontally over the **base of support**,
-- the trunk axis vertical, and
-- stance width and fore-aft foot alignment.
-
-It converges to a residual of about `1e-12`. `lat_bending` settles at
--0.126 rad, which is the model taking up its own leg-length difference -- what
-a person with a leg-length discrepancy does.
-
-Reset randomisation then breaks it again, in two ways: 0.02 rad at the ankle
-tilts a 0.2 m foot by 4 mm and lifts the heel, and a hip or knee perturbation
-moves a whole foot by up to 30 mm. `_seat_feet()` projects back onto the
-constraints after randomising, sharing the same unknowns because a per-leg
-solve is not enough -- the knee's lower limit is full extension, so once a leg
-is straight it cannot lengthen and the per-leg Newton stalls a millimetre
-short. Nine unknowns against six constraints, solved least-norm, costs about
-8 ms per reset.
-
-Measured over 40 resets: **both heels on the floor 40/40** (worst gap 1e-7 m),
-total contact load 0.87-1.35 body weights, COM over the base to 1e-12 m.
-
-Two honest caveats. A heel resting at `z = 0` does not always *carry* force --
-the split between heel and toe is the contact solver's to make in a statically
-indeterminate stance, and both heels are loaded on about 30 of 40 resets.
-And without a trained policy the model pitches forward and unloads its heels
-within about six steps; holding the stance is the policy's job, not the reset's.
-
-### Contact load is reported heel and toe separately
-
-`contact_loads()` returns `[heel_r, toe_r, heel_l, toe_l]` as fractions of body
-weight, and that split is in the observation. A single per-foot total cannot
-distinguish heel strike from toe-off, and that difference *is* gait phase.
-`foot_contact_loads()` and `heel_contact_loads()` are the obvious reductions.
-
 ## Three things that were wrong first, and are now tested
 
 These are the bugs a training run would have hidden rather than surfaced, so
@@ -248,7 +293,7 @@ every episode terminated on step 1. Posture is now derived from the
 pelvis-to-head vector and heading from the hip-to-hip vector, which are
 unambiguous whatever the frame convention.
 
-**2. The neutral pose faces 109°, not +x.** `initial_forward_velocity` was
+**2. The neutral pose faced 109°, not +x** (in the 3-D version). `initial_forward_velocity` was
 being written to the root's world-x dof, so stage B launched the model mostly
 *sideways* -- the `lateral` term scored 0.23 at reset, punishing the
 environment's own initial condition. The push now goes along the model's facing

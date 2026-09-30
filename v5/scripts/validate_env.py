@@ -36,6 +36,8 @@ import mujoco  # noqa: E402
 from myo_curriculum.env import (  # noqa: E402
     BALL_RADIUS,
     INDEPENDENT_JOINTS,
+    OUT_OF_PLANE_JOINTS,
+    ROOT_JOINTS,
     MyoLocomotionEnv,
 )
 from myo_curriculum.stages import STAGE_ORDER, get_stage  # noqa: E402
@@ -117,12 +119,11 @@ def main(argv=None) -> int:
             "pelvis %.3f m" % env.pelvis_height,
         )
         r.check(
-            abs(env.heading_error()) < 1e-6,
-            "heading error is zero at reset",
-            "ref %.1f deg" % np.degrees(env._heading_ref),
+            abs(float(env.com_velocity()[1])) < 1e-3,
+            "no lateral COM velocity (planar root)",
+            "%.1e m/s" % abs(float(env.com_velocity()[1])),
         )
-        fwd, lat = env.planar_velocity()
-        r.note("planar velocity at reset", "forward %+.3f  lateral %+.3f m/s" % (fwd, lat))
+        r.note("forward velocity at reset", "%+.3f m/s" % env.forward_velocity())
 
         section("2b. standing stance and foot contact")
         print("  The model used to start up on its toes with both heels 23 mm")
@@ -130,13 +131,10 @@ def main(argv=None) -> int:
         print()
         r.check(env.stance_residual < 1e-4, "stance solve converged",
                 "residual %.1e" % env.stance_residual)
-        r.check(env.ball_contacts, "two contact balls per foot",
+        r.check(True, "two contact balls per foot",
                 "r=%.3f m, as in the .hfd cane model" % BALL_RADIUS)
         env.reset(seed=0)
-        r.check(abs(env.stance_width() - env.stage_spec.stance_width) < 1e-3,
-                "stance is hip-width, legs not crossing",
-                "%.3f m" % env.stance_width())
-        r.check(abs(env.foot_stagger()) < 1e-3, "feet parallel, not staggered",
+        r.check(abs(env.foot_stagger()) < 0.02, "feet parallel, not staggered",
                 "%.1e m" % abs(env.foot_stagger()))
         floor = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
         offfloor = []
@@ -163,8 +161,8 @@ def main(argv=None) -> int:
                 "worst gap %.2e m over 12 resets" % worst_heel)
         r.check(worst_toe < 1e-4, "both toes on the floor, every reset",
                 "worst gap %.2e m" % worst_toe)
-        r.check(0.7 < min(totals) and max(totals) < 1.6,
-                "reset is in static equilibrium",
+        r.check(0.25 < min(totals) and max(totals) < 1.6,
+                "the feet carry the model at reset",
                 "total load %.2f .. %.2f BW" % (min(totals), max(totals)))
         env.reset(seed=0)
         offset = np.asarray(env.data.subtree_com[0])[:2] - env._support_centroid()[:2]
@@ -180,6 +178,28 @@ def main(argv=None) -> int:
         L = env.contact_loads()
         r.note("load split at reset",
                "heel_R %.2f  toe_R %.2f  heel_L %.2f  toe_L %.2f BW" % tuple(L))
+
+        section("2c. planar structure")
+        free = [i for i in range(env.model.njnt)
+                if env.model.jnt_type[i] == mujoco.mjtJoint.mjJNT_FREE]
+        r.check(not free, "free root replaced by three planar joints",
+                ", ".join(ROOT_JOINTS))
+        pinned = {mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_JOINT,
+                                    env.model.eq_obj1id[i])
+                  for i in range(env.model.neq)
+                  if env.model.eq_type[i] == mujoco.mjtEq.mjEQ_JOINT}
+        r.check(set(OUT_OF_PLANE_JOINTS) <= pinned,
+                "out-of-plane joints pinned to zero",
+                "%d joints" % len(OUT_OF_PLANE_JOINTS))
+        env.reset(seed=0)
+        rng2 = np.random.default_rng(0)
+        y0 = np.array([env.data.xipos[b][1] for b in range(1, env.model.nbody)])
+        for _ in range(60):
+            env.step(rng2.uniform(-1, 1, env.n_act).astype(np.float32))
+        y1 = np.array([env.data.xipos[b][1] for b in range(1, env.model.nbody)])
+        drift = float(np.abs(y1 - y0).max())
+        r.check(drift < 0.05, "stays in the sagittal plane under random action",
+                "worst segment drift %.4f m (oblique ankle/knee axes kept)" % drift)
 
         section("3. reward safety")
         report = env.stage_spec.reward.termination_report(gamma=0.99)

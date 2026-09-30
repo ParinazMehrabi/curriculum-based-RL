@@ -41,14 +41,18 @@ def still(env, width, height):
     """Views of the reset stance, including a close-up of the foot contacts."""
     env.reset(seed=0)
     renderer = mujoco.Renderer(env.model, height=height, width=width)
-    options = mujoco.MjvOption()
-    options.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
-    options.geomgroup[4] = 1   # MyoSuite's collision group, where the balls live
+    plain = mujoco.MjvOption()
+    plain.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
+    # Group 4 is MyoSuite's collision group, where the contact balls live. It
+    # is only turned on for the foot close-up, because it also holds the
+    # torso, head and pelvis collision volumes, which bury the skeleton in a
+    # whole-body view.
+    feet = mujoco.MjvOption()
+    feet.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
+    feet.geomgroup[4] = 1
     cam = make_camera(env)
     frames, labels = [], []
-    # The model faces ~109 degrees, so offset the azimuths from that to get
-    # recognisable front / side / back views rather than arbitrary ones.
-    facing = np.degrees(env._heading_ref)
+    facing = 0.0  # planar model: it faces +x by construction
     views = (
         (0, 0.95, 2.4, -6, "front"),
         (90, 0.95, 2.4, -6, "side"),
@@ -64,7 +68,11 @@ def still(env, width, height):
         cam.distance = distance
         cam.azimuth = facing + azimuth
         cam.elevation = elevation
-        renderer.update_scene(env.data, camera=cam, scene_option=options)
+        renderer.update_scene(
+            env.data,
+            camera=cam,
+            scene_option=feet if label == "foot contacts" else plain,
+        )
         frames.append(renderer.render())
         labels.append(label)
     renderer.close()
@@ -87,7 +95,7 @@ def rollout(env, width, height, steps, policy="low", seed=0):
             a = np.full(env.n_act, -0.6, np.float32)
         _, _, term, trunc, _ = env.step(a)
         if i % keep == 0:
-            cam = make_camera(env, azimuth=np.degrees(env._heading_ref) + 90)
+            cam = make_camera(env, azimuth=90.0)
             renderer.update_scene(env.data, camera=cam)
             frames.append(renderer.render())
             labels.append("t=%.2fs" % (env.steps * env.dt))
@@ -139,8 +147,9 @@ def main(argv=None) -> int:
     env = MyoLocomotionEnv(stage=args.stage, seed=0)
     if args.mode == "still":
         frames, labels = still(env, args.width, args.height)
-        title = "MyoSuite MyoFullBody — muscle-actuated locomotion model"
-        sub = "myo_sim/body/myobody.xml (Apache-2.0)   ·   red strands are Hill-type muscle paths"
+        title = "MyoFullBody, planar — muscle-actuated 2D locomotion model"
+        sub = ("myo_sim/body/myobody.xml (Apache-2.0), restructured to the sagittal plane"
+       "   ·   red strands are Hill-type muscle paths")
     else:
         frames, labels = rollout(env, args.width, args.height, args.steps, args.policy, 0)
         title = "MyoFullBody rollout — stage %s, %s policy" % (args.stage, args.policy)
@@ -148,7 +157,7 @@ def main(argv=None) -> int:
 
     footer = (
         "%d bodies · %d qpos · %d Hill-type muscles · %d activation states · %.1f kg\n"
-        "17 independent joints; 29 more follow equality constraints (knee rolling contact, lumbar distribution)\n"
+        "planar: 3 root dof (pelvis_tx/ty/tilt) + 9 sagittal joints, 8 out-of-plane joints pinned to zero\n"
         "reset stance solved plantigrade to %.0e m, COM over the base of support\n"
         "contact load   heel_R %.2f   toe_R %.2f   heel_L %.2f   toe_L %.2f   (body weight)"
         % (env.model.nbody, env.model.nq, env.n_muscle, env.model.na,
