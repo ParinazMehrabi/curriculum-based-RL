@@ -273,8 +273,9 @@ STAGE_B = StageSpec(
 
 # Stage W: the reward the project actually asked for.
 #
-#   big penalty for falling      -> early termination plus a small explicit
-#                                   penalty; see below
+#   big penalty for falling      -> early termination: the forfeited remainder
+#                                   of the episode, which is hundreds of
+#                                   points. No explicit spike; see below.
 #   0.1  for surviving 10 s      -> 0.10/step alive bonus over 1000 steps
 #   0.7  for moving forward      -> paid ONCE at the end, against distance
 #                                   covered, open-ended: 0.70 * 1000 * travel
@@ -299,10 +300,23 @@ STAGE_B = StageSpec(
 # distance at the end, a fall at step 32 has covered ~0.05 m, worth 35 before
 # the survival factor scales it to 1.1.
 #
-# fall_penalty stays small on purpose. With early termination, falling already
-# forfeits the rest of the episode -- up to ~900 steps at ~1.0 -- and that is
-# the real penalty. A large explicit one on top makes standing still dominate
-# any policy that risks moving. RewardSpec.termination_report() checks this.
+# fall_penalty is **zero**, and that is deliberate. Falling is a part of
+# training, not a cliff: it has to be something the policy can try, be scored
+# for, and learn from. Early termination already prices it -- a fall at step 60
+# forfeits ~940 steps of alive and tracking plus the whole forward payment,
+# which is hundreds of points -- so an explicit penalty on top only adds a
+# spike. At the 5.0 it used to be, the falling step scored -4.89 against a
+# per-step maximum of 0.30: sixteen times the largest reward any step can earn,
+# concentrated on one transition. That is a wall, and a value function fitting
+# it spends its capacity on the wall rather than on what led to it.
+#
+# Travelling backwards is priced the same way, by the forward term being signed
+# rather than clipped at zero: retreating costs proportionally, so there is a
+# gradient back towards forwards from anywhere. Nothing terminates on it.
+#
+# RewardSpec.termination_report() still checks the remaining case -- that
+# continuing is never worse than quitting -- and with a non-negative per-step
+# reward it is satisfied outright.
 STAGE_W = StageSpec(
     key="W",
     name=WALK_TRACK,
@@ -318,7 +332,7 @@ STAGE_W = StageSpec(
         alive=0.10,
         shaping_scale=0.20,
         composition=ADDITIVE,
-        fall_penalty=5.0,
+        fall_penalty=0.0,
         weights={"tracking": 1.00},
     ),
 )

@@ -778,9 +778,10 @@ class MyoLocomotionEnv(gym.Env):
         self.data.qvel[:] = 0.0
 
         if spec.rsi and self.reference is not None:
-            # Reference-state initialisation: start at a random phase of the
-            # gait. The pose is the reference's, so the feet are *not* seated
-            # -- forcing them flat would corrupt a mid-swing frame.
+            # Reference-state initialisation: start at a random phase of
+            # the gait. The feet are not forced flat -- that would corrupt a
+            # mid-swing frame -- only stood on whichever contact point is
+            # lowest, below.
             self.ref_phase = float(self.rng.uniform())
             self.apply_reference_pose(self.ref_phase)
             for name in INDEPENDENT_JOINTS:
