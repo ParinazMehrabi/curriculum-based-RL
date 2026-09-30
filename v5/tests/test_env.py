@@ -729,13 +729,16 @@ def test_falling_collects_almost_none_of_the_forward_bonus(track_env):
 
 
 def test_forward_bonus_scales_with_distance(track_env):
-    """Zero at a standstill, saturating at the target distance."""
-    from myo_curriculum.rewards import smoothstep
+    """Zero at a standstill, saturating at the target distance.
 
+    Survival is held at a full episode so this isolates the distance factor;
+    `test_forward_bonus_is_monotone_in_survival` covers the other one.
+    """
     stage = track_env.stage_spec
     cap = stage.forward_bonus * stage.episode_steps
     track_env.reset(seed=0)
     base = track_env._start_tx
+    track_env.steps = stage.episode_steps
     seen = []
     for d in (0.0, 0.25, 0.5, 1.0, 2.0):
         track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base + d
@@ -809,3 +812,64 @@ def test_stage_w_reward_is_never_negative_while_alive(track_env):
         assert reward >= 0.0
         if trunc:
             break
+
+
+def test_forward_bonus_requires_surviving_not_just_travelling(track_env):
+    """Regression: the policy learned to dive.
+
+    At iteration 180 it accelerated to 1.67 m/s -- eleven times the
+    reference's speed -- covered 0.57 m in 74 steps and fell, collecting 425
+    of 700, which was 98.7% of its return. Distance alone rewards a lunge
+    exactly as well as a walk. Multiplying by the fraction of the episode
+    survived makes survival a multiplier rather than a bonus.
+    """
+    from myo_curriculum.rewards import smoothstep
+
+    stage = track_env.stage_spec
+    assert stage.forward_requires_survival
+    cap = stage.forward_bonus * stage.episode_steps
+    distance_only = cap * smoothstep(0.572, 0.0, stage.forward_target_distance)
+
+    track_env.reset(seed=0)
+    base = track_env._start_tx
+    track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base + 0.572
+    track_env.steps = 74                      # the dive
+    dive = track_env.forward_bonus()
+    track_env.steps = stage.episode_steps     # same distance, full episode
+    survived = track_env.forward_bonus()
+
+    assert dive < 0.1 * distance_only, "a dive should not collect the distance"
+    assert survived == pytest.approx(distance_only)
+    assert survived > 10 * dive
+
+
+def test_forward_bonus_is_monotone_in_survival(track_env):
+    track_env.reset(seed=0)
+    base = track_env._start_tx
+    track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base + 0.5
+    seen = []
+    for steps in (50, 200, 500, 1000):
+        track_env.steps = steps
+        seen.append(track_env.forward_bonus())
+    assert all(b > a for a, b in zip(seen, seen[1:]))
+
+
+def test_forward_bonus_survival_factor_saturates_at_the_episode_length(track_env):
+    track_env.reset(seed=0)
+    base = track_env._start_tx
+    track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base + 2.0
+    track_env.steps = track_env.stage_spec.episode_steps
+    full = track_env.forward_bonus()
+    track_env.steps = track_env.stage_spec.episode_steps * 3
+    assert track_env.forward_bonus() == pytest.approx(full)
+
+
+def test_tracking_threshold_is_a_backstop_not_the_main_terminator(track_env):
+    """Measured: at 0.80 it ended 13 of 20 episodes at a mean of 32 steps.
+
+    At 1.5 it never fires and every episode ends on trunk tilt at 39; above
+    1.5 it stops binding at all. So 1.5 is where it becomes a guard against
+    drifting off the reference while upright, rather than the thing that ends
+    most episodes.
+    """
+    assert track_env.stage_spec.max_tracking_error == pytest.approx(1.50)

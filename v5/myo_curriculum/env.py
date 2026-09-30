@@ -422,16 +422,27 @@ class MyoLocomotionEnv(gym.Env):
     def forward_bonus(self) -> float:
         """The terminal forward-progress payment for the episode so far.
 
-        Zero unless the stage pays one. Scaled by `episode_steps` so it keeps
-        its share of a full episode's return, and driven by *distance* rather
-        than speed so that falling -- which ends the episode early -- cannot
-        collect it.
+        Distance **times** survival. Distance alone is not enough: a trained
+        policy learns to dive -- accelerate hard, bank the distance, fall. One
+        measured at iteration 180 reached 1.67 m/s, eleven times the
+        reference's speed, covered 0.57 m in 0.74 s and collected 425 of 700,
+        which was 98.7% of its return. Scaling by the fraction of the episode
+        survived drops that same dive to about 31.
+
+        Gating strictly on truncation -- pay only if the full episode is
+        survived -- also kills the dive, but pays nothing at all until the
+        policy can already last 1000 steps, which removes 70% of the reward
+        exactly when it is needed. The product keeps a gradient for partial
+        progress while making survival a multiplier rather than a bonus.
         """
         spec = self.stage_spec
         if spec.forward_bonus <= 0.0:
             return 0.0
         progress = smoothstep(self.travel, 0.0, spec.forward_target_distance)
-        return spec.forward_bonus * spec.episode_steps * progress
+        survived = 1.0
+        if spec.forward_requires_survival:
+            survived = min(1.0, self.steps / max(1, spec.episode_steps))
+        return spec.forward_bonus * spec.episode_steps * progress * survived
 
     def contact_loads(self) -> np.ndarray:
         """Vertical load on [heel_r, toe_r, heel_l, toe_l], as a fraction of BW.

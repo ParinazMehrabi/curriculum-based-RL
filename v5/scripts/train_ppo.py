@@ -66,8 +66,10 @@ class SyncVecEnv:
     wrong silently corrupts truncation bootstrapping.
     """
 
-    def __init__(self, stage: str, n: int, seed: int = 0):
-        self.envs = [MyoLocomotionEnv(stage=stage, seed=seed + i) for i in range(n)]
+    def __init__(self, stage: str, n: int, seed: int = 0, **overrides):
+        self.envs = [
+            MyoLocomotionEnv(stage=stage, seed=seed + i, **overrides) for i in range(n)
+        ]
         self.n = n
         self.obs_dim = self.envs[0].observation_space.shape[0]
         self.act_dim = self.envs[0].n_act
@@ -249,6 +251,12 @@ def parse_args(argv=None):
     p.add_argument("--tau-start", type=float, default=1.0)
     p.add_argument("--tau-end", type=float, default=0.2)
     p.add_argument("--no-normalize-returns", action="store_true")
+    # stage overrides, validated by StageSpec.with_overrides
+    p.add_argument("--max-tracking-error", type=float, default=None,
+                   help="RMS joint deviation that ends an episode (stage default 1.5)")
+    p.add_argument("--forward-bonus", type=float, default=None,
+                   help="per-step-equivalent weight of the terminal forward payment")
+    p.add_argument("--fall-penalty", type=float, default=None)
     # bookkeeping
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=Path, default=V5 / "runs")
@@ -267,7 +275,14 @@ def main(argv=None) -> int:
     np.random.seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
-    envs = SyncVecEnv(args.stage, args.num_envs, args.seed)
+    overrides = {}
+    if args.max_tracking_error is not None:
+        overrides["max_tracking_error"] = args.max_tracking_error
+    if args.forward_bonus is not None:
+        overrides["forward_bonus"] = args.forward_bonus
+    if args.fall_penalty is not None:
+        overrides["fall_penalty"] = args.fall_penalty
+    envs = SyncVecEnv(args.stage, args.num_envs, args.seed, **overrides)
     net = PhaseGatedActorCritic(
         envs.obs_dim, envs.act_dim, gait_state_dim(envs.layout), n_phases=args.phases
     )

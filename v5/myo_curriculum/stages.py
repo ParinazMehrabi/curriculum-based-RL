@@ -81,7 +81,14 @@ class StageSpec:
     rsi_velocity_scale: float = 0.0
     # Terminate when the RMS joint deviation from the reference exceeds this,
     # so the policy never banks return from a desynced state. None disables it.
-    max_tracking_error: float = 0.80
+    #
+    # 1.5 rather than the 0.80 it started at. Measured on a low-activation
+    # policy, 0.80 ended 13 of 20 episodes at a mean length of 32 steps; 1.5
+    # never fires and every episode ends on trunk tilt at 39. Above 1.5 it
+    # stops binding altogether, so this is the point where it becomes a
+    # backstop against a policy that drifts off the reference while staying
+    # upright, rather than the thing that ends most episodes.
+    max_tracking_error: float = 1.50
 
     # Forward progress, paid once when the episode ends rather than per step.
     #
@@ -99,6 +106,10 @@ class StageSpec:
     # Distance for full credit, metres. Defaults to velocity_gate * duration,
     # i.e. the distance covered by holding the target speed for the episode.
     forward_target_distance: float = 1.0
+    # Multiply the bonus by the fraction of the episode survived, so distance
+    # only pays if it is held. Without it the policy dives: accelerate, bank
+    # the distance, fall. See MyoLocomotionEnv.forward_bonus.
+    forward_requires_survival: bool = True
 
     # Stance width needs no parameter any more: hip adduction is pinned to
     # zero by the planar constraint, so the feet sit at the model's own hip
