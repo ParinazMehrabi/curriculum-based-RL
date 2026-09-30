@@ -13,6 +13,7 @@ v5/
     rewards.py    loads v4's reward primitives (not a copy -- see below)
     stages.py     the stages, as data
     reference.py  the reference gait, mapped onto this model
+    policy.py     phase-gated mixture-of-experts network (torch)
     env.py        the single environment class
     __init__.py   gymnasium registration + variant helper
   run.ps1         PowerShell wrapper: absolute interpreter path, clean env
@@ -20,7 +21,7 @@ v5/
     validate_env.py  smoke test: frame, planarity, contact, reward, gradient
     run_reward.py    run an episode, printing the reward term by term
     render.py        multi-view still or rollout figure
-  tests/          59 tests
+  tests/          80 tests
   figures/        rendered PNGs (referenced above)
 ```
 
@@ -70,16 +71,21 @@ On PowerShell, `run.ps1` resolves the interpreter by absolute path and clears
 the environment variables that can stop a venv interpreter starting:
 
 ```powershell
-.un.ps1 scriptsun_reward.py --stage W
-.un.ps1 scriptsalidate_env.py
-.un.ps1 -m pytest tests -q
+.
+un.ps1 scripts
+un_reward.py --stage W
+.
+un.ps1 scriptsalidate_env.py
+.
+un.ps1 -m pytest tests -q
 ```
 
 Or activate it once and use `python` directly:
 
 ```powershell
 ..\.venv-myo\Scripts\Activate.ps1
-python scriptsun_reward.py --stage W
+python scripts
+un_reward.py --stage W
 ```
 
 Calling the interpreter by relative path works too, when the shell cooperates:
@@ -461,6 +467,90 @@ initial sigma of 0.35 against a 1.2 m/s target, a motionless model scored
 This is the same trap v4's stage D fell into and its README documents. Sigma is
 now 0.80, so standstill scores 0.11 and every 0.1 m/s gained is worth
 something. `validate_env.py` checks every term is off its floor at reset.
+
+## The network
+
+`policy.py`. 1.43 M parameters, no labels anywhere in the loss.
+
+```
+gait state g_t (30)  ->  GRU(64)  ->  emission logits e_t (4)
+                                          |
+                              differentiable HMM filter
+                      b_t = softmax( log(b_{t-1}ᵀ T) + log_softmax(e_t / τ) )
+                                          |
+                                    belief b_t (4)
+                                          |
+full obs o_t (610) --------------------- + ->  4 experts, 610-256-256-290
+                                               a = Σ b_t[k] · expert_k(o_t)
+```
+
+The critic is separate: `[o_t, b_t] → 256 → 256 → 1`. Sharing a trunk with the
+gate makes the value objective compete with the clustering.
+
+| | |
+|---|---|
+| gate | 0.019 M |
+| actor (4 experts) | 1.187 M |
+| critic | 0.223 M |
+
+### Four decisions that carry the design
+
+**The gate sees 30 dims, not 610.** 580 of the observation is muscle
+activation and `prev_action`; phase does not depend on them. `gait_state_dim()`
+derives the slice from the environment's own `obs_layout()`, so it tracks the
+observation instead of being hard-coded — a test pins that changing the
+activation block does not move the belief.
+
+**The latent is a transition, not a classifier.** `p(z_t | z_{t-1}, o_t)`. A
+memoryless softmax re-decides every 10 ms and flickers; the transition matrix
+is what makes it segment. Initialised diagonal-dominant with a mild push to the
+next index:
+
+```
+from\to    0      1      2      3
+   0     0.81   0.11   0.04   0.04
+   1     0.04   0.81   0.11   0.04
+   2     0.04   0.04   0.81   0.11
+   3     0.11   0.04   0.04   0.81
+```
+
+That says phases *persist* and *follow one another*. It does not say which
+phase is which. Every entry is free to learn, and for a periodic gait it should
+sharpen toward a cycle — read it off `gate.transition_matrix()` afterwards.
+
+**Nothing supervises the phase.** Three auxiliary losses, no labels:
+
+| term | effect |
+|---|---|
+| `switching_loss` | KL between consecutive beliefs — temporal consistency, the one that matters most |
+| `balance_loss` | −H(batch-mean belief) — stops collapse onto one expert |
+| `confidence_loss` | mean per-step entropy — keeps the gate decisive |
+
+The last two pull against each other on purpose: **confident per step, balanced
+across the batch**. That tension is the clustering objective. RSI sampling the
+cycle uniformly already balances the batch, so `balance_loss` can take a small
+weight.
+
+**Blending is annealed toward hard.** Averaging two experts' 290-d activation
+vectors is *not* averaging their behaviours — muscle force is nonlinear in
+activation, and two experts extending the knee through different muscles
+average into co-contraction. Lowering `τ` sharpens `b_t` toward one-hot and
+keeps the blend window short. A test confirms belief entropy falls with `τ`.
+
+### Checking whether it worked
+
+`phase_alignment(beliefs, reference_phase)` returns mean belief per bin of
+reference cycle. Near-permutation means the gate found the gait's structure;
+collapsed or split on something else shows immediately. **A diagnostic, never a
+loss** — the labels stay out of training.
+
+### Not yet wired
+
+There is no PPO loop. The network exposes what one needs — `act()` for rollout,
+`evaluate()` for the update, recomputing hidden state rather than replaying it
+(stale hidden states are how recurrent PPO goes quietly off-policy) — and a
+test asserts the two agree to 1e-5. Bring-up order still matters: plain MLP on
+stage A first, then walking, then the gate.
 
 ## Not done
 
