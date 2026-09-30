@@ -16,7 +16,9 @@ else:
     sys.modules[_NAME] = _module
     _spec.loader.exec_module(_module)
 
+BestCheckpoints = _module.BestCheckpoints
 RunningStd = _module.RunningStd
 SyncVecEnv = _module.SyncVecEnv
 compute_gae = _module.compute_gae
+save_checkpoint = _module.save_checkpoint
 parse_args = _module.parse_args

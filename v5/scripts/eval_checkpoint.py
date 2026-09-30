@@ -7,6 +7,10 @@
 Runs `--episodes` episodes and prints the per-step reward breakdown of the one
 with the highest return. Nothing else.
 
+The best episode is rendered automatically to `render/<run>_it<N>_ret<R>.mp4`,
+under a name no existing file has, so repeated evaluations never overwrite each
+other. `--no-render` skips it.
+
 Safe to run against a training job: the checkpoint is copied before loading,
 so this process never holds the trainer's file open.
 """
@@ -64,6 +68,28 @@ def load_checkpoint(path: Path, attempts: int = 5):
                 except OSError:
                     pass
     raise RuntimeError("could not read %s (%r)" % (path, last))
+
+
+def render_name(ckpt_path: Path, iteration, ret: float) -> str:
+    """A name carrying which run, which checkpoint and how well it scored."""
+    run = ckpt_path.parent.name or "run"
+    it = "it%06d" % int(iteration) if iteration is not None else ckpt_path.stem
+    return "%s_%s_ret%+09.2f" % (run, it, ret)
+
+
+def unique_path(directory: Path, stem: str, suffix: str) -> Path:
+    """`directory/stem+suffix`, with a counter appended if that name is taken.
+
+    Evaluations of the same checkpoint would otherwise overwrite the previous
+    video, which is the one case where the name alone is not unique.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (stem + suffix)
+    n = 2
+    while path.exists():
+        path = directory / ("%s_%d%s" % (stem, n, suffix))
+        n += 1
+    return path
 
 
 def render_episode(env, qpos_frames, path: Path, fps: int, width: int, height: int):
@@ -136,7 +162,11 @@ def main(argv=None) -> int:
     ap.add_argument("--sample", action="store_true",
                     help="sample actions instead of using the distribution mean")
     ap.add_argument("--render", type=Path, default=None,
-                    help="write the best episode to this .mp4 or .gif")
+                    help="write the best episode here instead of render/")
+    ap.add_argument("--render-dir", type=Path, default=V5 / "render",
+                    help="where auto-named videos go")
+    ap.add_argument("--no-render", action="store_true",
+                    help="print the reward detail only")
     ap.add_argument("--fps", type=int, default=0, help="default is realtime (1/dt)")
     ap.add_argument("--width", type=int, default=720)
     ap.add_argument("--height", type=int, default=640)
@@ -156,6 +186,8 @@ def main(argv=None) -> int:
     )
     net.load_state_dict(ckpt["net"])
     net.eval()
+
+    rendering = not args.no_render
 
     max_step = env.stage_spec.reward.alive + env.stage_spec.reward.shaping_scale
     max_terminal = env.stage_spec.forward_bonus * env.stage_spec.episode_steps
@@ -183,7 +215,7 @@ def main(argv=None) -> int:
                 # reward is invisible until the last line.
                 "forward": env.forward_bonus(), "travel": env.travel,
                 "velocity": env.forward_velocity(),
-                "qpos": env.data.qpos.copy() if args.render else None,
+                "qpos": env.data.qpos.copy() if rendering else None,
             })
             reset_flag = torch.zeros(1)
             if terminated or truncated:
@@ -217,12 +249,21 @@ def main(argv=None) -> int:
           % (best["return"], best["return"] - best["terminal"], best["terminal"],
              pct(best["return"], max_episode), max_episode))
 
-    if args.render:
+    if rendering:
+        if args.render is not None:
+            out = args.render
+            out.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            out = unique_path(
+                args.render_dir,
+                render_name(ckpt_path, ckpt.get("iteration"), best["return"]),
+                ".mp4",
+            )
         fps = args.fps or int(round(1.0 / env.dt))
         n = render_episode(env, [r["qpos"] for r in best["record"]],
-                           args.render, fps, args.width, args.height)
+                           out, fps, args.width, args.height)
         print("wrote %s  (%d frames, %d fps, %.2f s)"
-              % (args.render, n, fps, n / fps))
+              % (out, n, fps, n / fps))
     env.close()
     return 0
 

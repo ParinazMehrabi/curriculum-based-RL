@@ -4,6 +4,11 @@
     python scripts/train_ppo.py --phases 1        # plain-MLP baseline, no gate
     python scripts/train_ppo.py --resume runs/W-.../ckpt_latest.pt
 
+Each run writes `ckpt_latest.pt` for resuming and keeps its ten
+highest-return checkpoints as `ckpt_best_it<N>_ret<R>.pt`, pruning its own
+lower-scoring ones as better iterations arrive. Nothing else in `runs/` is
+ever deleted.
+
 Recurrent PPO is where implementations usually go quietly wrong, so the three
 things that matter are handled explicitly and each is noted where it happens:
 
@@ -183,6 +188,71 @@ def save_checkpoint(payload: dict, path: Path, attempts: int = 5) -> bool:
     return False
 
 
+class BestCheckpoints:
+    """Keep a run's `keep` highest-scoring checkpoints, and no more.
+
+    Only files this object itself wrote are ever deleted, and only while they
+    are still in the run directory it was constructed with and still carry the
+    `ckpt_best_` prefix. Pruning by globbing a directory is how two of this
+    project's runs were destroyed; a list of files this process created cannot
+    match anything it did not create. `ckpt_latest.pt` is not in that list and
+    is never touched -- resuming needs the newest state, not the best-scoring
+    one.
+
+    Scores are offered at the save cadence rather than every iteration: a
+    checkpoint is ~17 MB, and mean return over one 2048-step batch is noisy
+    enough that the per-iteration maximum would mostly select for luck.
+    """
+
+    PREFIX = "ckpt_best_"
+
+    def __init__(self, run: Path, keep: int = 10):
+        self.run = run
+        self.keep = max(1, int(keep))
+        self.entries: list = []          # (score, path), worst score first
+
+    def filename(self, score: float, iteration: int) -> str:
+        return "%sit%06d_ret%+09.2f.pt" % (self.PREFIX, iteration, score)
+
+    def _own(self, path: Path) -> bool:
+        """Whether deleting `path` is something this object is allowed to do."""
+        return (path.parent == self.run
+                and path.name.startswith(self.PREFIX)
+                and path.suffix == ".pt")
+
+    def offer(self, score: float, iteration: int, payload: dict):
+        """Save `payload` if `score` makes the top `keep`. Returns its path."""
+        if score != score:               # NaN never displaces a real score
+            return None
+        if len(self.entries) >= self.keep and score <= self.entries[0][0]:
+            return None
+
+        path = self.run / self.filename(score, iteration)
+        if not save_checkpoint(payload, path):
+            return None
+
+        self.entries.append((float(score), path))
+        self.entries.sort(key=lambda e: e[0])
+        while len(self.entries) > self.keep:
+            _, drop = self.entries.pop(0)
+            if drop == path or not self._own(drop):
+                continue
+            try:
+                drop.unlink(missing_ok=True)
+            except OSError as exc:       # a reader may hold it; try again later
+                print("   [warn] could not prune %s (%r)" % (drop.name, exc))
+                self.entries.insert(0, (float("-inf"), drop))
+        return path
+
+    def summary(self) -> str:
+        if not self.entries:
+            return "no best checkpoints"
+        return "best %d of %d kept: ret %.2f .. %.2f" % (
+            len(self.entries), self.keep,
+            self.entries[0][0], self.entries[-1][0],
+        )
+
+
 def compute_gae(
     rewards: torch.Tensor,       # (T, N)
     values: torch.Tensor,        # (T, N)
@@ -261,6 +331,8 @@ def parse_args(argv=None):
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=Path, default=V5 / "runs")
     p.add_argument("--save-every", type=int, default=20, help="iterations")
+    p.add_argument("--keep-best", type=int, default=10,
+                   help="how many highest-return checkpoints a run keeps")
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--resume", type=Path, default=None)
     p.add_argument("--torch-threads", type=int, default=0)
@@ -292,6 +364,14 @@ def main(argv=None) -> int:
     start_iter = 0
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
+        # A different expert count is a different network: load_state_dict
+        # would fail with a shape error that says nothing about the cause.
+        saved_phases = int(ckpt.get("args", {}).get("phases", args.phases))
+        if saved_phases != args.phases:
+            raise SystemExit(
+                "%s was trained with --phases %d, not %d"
+                % (args.resume, saved_phases, args.phases)
+            )
         net.load_state_dict(ckpt["net"])
         opt.load_state_dict(ckpt["opt"])
         start_iter = ckpt["iteration"]
@@ -308,6 +388,7 @@ def main(argv=None) -> int:
     )
     log_path = run / "log.csv"
     log_rows = []
+    keeper = BestCheckpoints(run, args.keep_best)
 
     batch = args.num_envs * args.num_steps
     iterations = max(1, args.total_steps // batch)
@@ -500,12 +581,13 @@ def main(argv=None) -> int:
             )
 
         if iteration % args.save_every == 0 or iteration == start_iter + iterations - 1:
-            save_checkpoint(
-                {"net": net.state_dict(), "opt": opt.state_dict(),
-                 "iteration": iteration, "args": vars(args),
-                 "ret_norm": ret_norm.__dict__ if ret_norm else None},
-                run / "ckpt_latest.pt",
-            )
+            payload = {"net": net.state_dict(), "opt": opt.state_dict(),
+                       "iteration": iteration, "args": vars(args),
+                       "ret_norm": ret_norm.__dict__ if ret_norm else None}
+            save_checkpoint(payload, run / "ckpt_latest.pt")
+            kept = keeper.offer(row["return_mean"], iteration, payload)
+            if kept is not None:
+                print("   [best] %s  (%s)" % (kept.name, keeper.summary()))
             import csv
 
             try:

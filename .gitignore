@@ -39,3 +39,4 @@ MUJOCO_LOG.TXT
 # Training runs: checkpoints are ~17 MB each and logs are regenerated.
 # Never delete this directory to keep it out of a commit -- ignore it.
 v5/runs/
+v5/render/
