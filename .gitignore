@@ -35,3 +35,7 @@ MUJOCO_LOG.TXT
 # .venv-myo interpreter does not depend on a roaming AppData path -- see
 # v5/README.md. ~90 MB, regenerate rather than commit.
 .python312/
+
+# Training runs: checkpoints are ~17 MB each and logs are regenerated.
+# Never delete this directory to keep it out of a commit -- ignore it.
+v5/runs/
