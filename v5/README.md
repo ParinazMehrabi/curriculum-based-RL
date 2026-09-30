@@ -15,6 +15,7 @@ v5/
     reference.py  the reference gait, mapped onto this model
     env.py        the single environment class
     __init__.py   gymnasium registration + variant helper
+  run.ps1         PowerShell wrapper: absolute interpreter path, clean env
   scripts/
     validate_env.py  smoke test: frame, planarity, contact, reward, gradient
     run_reward.py    run an episode, printing the reward term by term
@@ -39,6 +40,24 @@ uv pip install --python .venv-myo/Scripts/python.exe myosuite pytest matplotlib 
 ```
 
 Then, from `v5/`:
+
+On PowerShell, `run.ps1` resolves the interpreter by absolute path and clears
+the environment variables that can stop a venv interpreter starting:
+
+```powershell
+.un.ps1 scriptsun_reward.py --stage W
+.un.ps1 scriptsalidate_env.py
+.un.ps1 -m pytest tests -q
+```
+
+Or activate it once and use `python` directly:
+
+```powershell
+..\.venv-myo\Scripts\Activate.ps1
+python scriptsun_reward.py --stage W
+```
+
+Calling the interpreter by relative path works too, when the shell cooperates:
 
 ```bash
 # watch the reward, term by term, every step
