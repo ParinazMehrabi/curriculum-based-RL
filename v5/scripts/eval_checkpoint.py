@@ -66,6 +66,49 @@ def load_checkpoint(path: Path, attempts: int = 5):
     raise RuntimeError("could not read %s (%r)" % (path, last))
 
 
+def render_episode(env, qpos_frames, path: Path, fps: int, width: int, height: int):
+    """Replay a recorded episode into the model and write it out.
+
+    The episode is replayed from its stored `qpos` rather than re-simulated,
+    so the video is exactly the episode that was scored -- re-running would
+    diverge on any nondeterminism.
+    """
+    import mujoco
+
+    renderer = mujoco.Renderer(env.model, height=height, width=width)
+    options = mujoco.MjvOption()
+    options.geomgroup[4] = 1  # MyoSuite's collision group: the contact balls
+    camera = mujoco.MjvCamera()
+    camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+    camera.distance = 2.6
+    camera.azimuth = 90.0     # sagittal: the plane the model moves in
+    camera.elevation = -6.0
+
+    frames = []
+    for qpos in qpos_frames:
+        env.data.qpos[:] = qpos
+        env.data.qvel[:] = 0.0
+        mujoco.mj_forward(env.model, env.data)
+        camera.lookat[:] = env.data.subtree_com[0]
+        camera.lookat[2] = 0.9        # keep the body framed, not the feet
+        renderer.update_scene(env.data, camera=camera, scene_option=options)
+        frames.append(renderer.render())
+    renderer.close()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.suffix.lower() == ".gif":
+        from PIL import Image
+
+        images = [Image.fromarray(f) for f in frames]
+        images[0].save(path, save_all=True, append_images=images[1:],
+                       duration=int(1000 / fps), loop=0)
+    else:
+        import imageio.v2 as imageio
+
+        imageio.mimsave(path, frames, fps=fps, macro_block_size=None)
+    return len(frames)
+
+
 def contributions(env, term_values):
     """Each term's contribution to the step reward, and its maximum."""
     spec = env.stage_spec.reward
@@ -92,6 +135,11 @@ def main(argv=None) -> int:
     ap.add_argument("--stage", default=None, help="override the checkpoint's stage")
     ap.add_argument("--sample", action="store_true",
                     help="sample actions instead of using the distribution mean")
+    ap.add_argument("--render", type=Path, default=None,
+                    help="write the best episode to this .mp4 or .gif")
+    ap.add_argument("--fps", type=int, default=0, help="default is realtime (1/dt)")
+    ap.add_argument("--width", type=int, default=720)
+    ap.add_argument("--height", type=int, default=640)
     args = ap.parse_args(argv)
 
     ckpt_path = args.ckpt or newest_checkpoint(args.runs)
@@ -135,6 +183,7 @@ def main(argv=None) -> int:
                 # reward is invisible until the last line.
                 "forward": env.forward_bonus(), "travel": env.travel,
                 "velocity": env.forward_velocity(),
+                "qpos": env.data.qpos.copy() if args.render else None,
             })
             reset_flag = torch.zeros(1)
             if terminated or truncated:
@@ -167,6 +216,13 @@ def main(argv=None) -> int:
     print("return %.2f = %.2f per-step + %.2f forward  (%.1f%% of %.0f)"
           % (best["return"], best["return"] - best["terminal"], best["terminal"],
              pct(best["return"], max_episode), max_episode))
+
+    if args.render:
+        fps = args.fps or int(round(1.0 / env.dt))
+        n = render_episode(env, [r["qpos"] for r in best["record"]],
+                           args.render, fps, args.width, args.height)
+        print("wrote %s  (%d frames, %d fps, %.2f s)"
+              % (args.render, n, fps, n / fps))
     env.close()
     return 0
 
