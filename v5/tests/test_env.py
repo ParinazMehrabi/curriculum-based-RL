@@ -24,7 +24,13 @@ mujoco = pytest.importorskip("mujoco")
 pytest.importorskip("myosuite")
 
 from myo_curriculum import rewards as rewards_shim  # noqa: E402
-from myo_curriculum.env import INDEPENDENT_JOINTS, MyoLocomotionEnv  # noqa: E402
+from myo_curriculum.env import (  # noqa: E402
+    BALL_CONTACTS,
+    BALL_RADIUS,
+    INDEPENDENT_JOINTS,
+    MYO_FOOT_GEOMS,
+    MyoLocomotionEnv,
+)
 from myo_curriculum.stages import STAGE_ORDER, STAGES, TermParams, get_stage  # noqa: E402
 
 
@@ -401,7 +407,7 @@ def test_pointing_it_at_a_torque_model_raises():
     if not torque_model.is_file():
         pytest.skip("v4 MJCF not generated")
     with pytest.raises(RuntimeError, match="missing expected joints|no muscle actuators"):
-        MyoLocomotionEnv(stage="A", model_path=torque_model)
+        MyoLocomotionEnv(stage="A", model_path=torque_model, ball_contacts=False)
 
 
 def test_a_muscleless_model_is_refused_by_the_actuator_check(tmp_path):
@@ -429,4 +435,111 @@ def test_a_muscleless_model_is_refused_by_the_actuator_check(tmp_path):
         encoding="utf-8",
     )
     with pytest.raises(RuntimeError, match="no muscle actuators"):
-        MyoLocomotionEnv(stage="A", model_path=xml)
+        MyoLocomotionEnv(stage="A", model_path=xml, ball_contacts=False)
+
+# -- two-ball foot contact -------------------------------------------------
+
+
+def test_each_foot_has_exactly_two_contact_balls(env):
+    """The cane model's contact scheme: one sphere at the heel, one at the toe.
+
+    MyoSuite wraps each foot in five capsules and an ellipsoid instead, which
+    is a different contact model -- a rolling sole with no clean heel/toe
+    split to read gait phase from.
+    """
+    collidable = set()
+    for g in range(env.model.ngeom):
+        if env.model.geom_contype[g] or env.model.geom_conaffinity[g]:
+            name = mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, g)
+            if name in BALL_CONTACTS or name in MYO_FOOT_GEOMS:
+                collidable.add(name)
+    assert collidable == set(BALL_CONTACTS)
+
+    for name in BALL_CONTACTS:
+        g = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        assert g >= 0, name
+        assert env.model.geom_type[g] == mujoco.mjtGeom.mjGEOM_SPHERE
+        assert float(env.model.geom_size[g][0]) == pytest.approx(BALL_RADIUS)
+
+
+def test_contact_balls_are_massless(env):
+    """A contact primitive must not change the segment's inertia.
+
+    Left at MuJoCo's default density the four spheres added 0.3 kg.
+    """
+    stock = MyoLocomotionEnv(stage="A", ball_contacts=False, seed=0)
+    try:
+        assert env.body_weight == pytest.approx(stock.body_weight, abs=0.05)
+    finally:
+        stock.close()
+
+
+def test_myosuite_foot_geoms_are_kept_but_not_collidable(env):
+    """They still draw the foot; they just no longer carry contact."""
+    for name in MYO_FOOT_GEOMS:
+        g = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        assert g >= 0, "%s should still exist for rendering" % name
+        assert env.model.geom_contype[g] == 0
+        assert env.model.geom_conaffinity[g] == 0
+
+
+def test_the_feet_do_not_collide_with_each_other(env):
+    """Regression: the solved stance put the feet 0.055 m apart laterally.
+
+    MyoSuite ships 14 leg-to-leg collision pairs, which bypass
+    contype/conaffinity entirely. With the legs that close the foot pair fired
+    with 569 N of spurious force -- more than half body weight -- which swamped
+    the real ground reaction and starved a heel of load. Nothing in the model
+    stops the legs crossing, so stance width has to be constrained explicitly.
+    """
+    floor = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+    for seed in range(12):
+        env.reset(seed=seed)
+        for i in range(env.data.ncon):
+            con = env.data.contact[i]
+            assert floor in (con.geom1, con.geom2), (
+                "non-floor contact at reset: %s <-> %s"
+                % (
+                    mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, con.geom1),
+                    mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, con.geom2),
+                )
+            )
+
+
+def test_stance_is_parallel_and_hip_width(env):
+    for seed in range(8):
+        env.reset(seed=seed)
+        assert env.stance_width() == pytest.approx(
+            env.stage_spec.stance_width, abs=1e-3
+        )
+        # Regression: left free, the solve settled on a 0.110 m split stance,
+        # which loads the feet diagonally.
+        assert abs(env.foot_stagger()) < 1e-3
+
+
+def test_all_four_balls_touch_the_floor_at_reset(env):
+    """Contact, as distinct from force.
+
+    Whether a given ball also *carries* load is the solver's to decide: four
+    coplanar point contacts against three equilibrium equations is
+    indeterminate, so one of them routinely comes out at zero. Touching is what
+    this env guarantees.
+    """
+    floor = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+    for seed in range(8):
+        env.reset(seed=seed)
+        touching = set()
+        for i in range(env.data.ncon):
+            con = env.data.contact[i]
+            other = con.geom2 if con.geom1 == floor else con.geom1
+            touching.add(mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, other))
+        assert touching == set(BALL_CONTACTS), "seed %d touched %s" % (seed, touching)
+
+
+def test_ball_contacts_can_be_turned_off_for_an_ablation():
+    stock = MyoLocomotionEnv(stage="A", ball_contacts=False, seed=0)
+    try:
+        g = mujoco.mj_name2id(stock.model, mujoco.mjtObj.mjOBJ_GEOM, "heel_r")
+        assert g < 0, "stock model should not have the contact balls"
+    finally:
+        stock.close()

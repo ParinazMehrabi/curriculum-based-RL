@@ -67,6 +67,12 @@ class StageSpec:
     target_vel: float = 0.0
     episode_steps: int = 1000
 
+    # Lateral distance between the feet in the reset stance, metres. The hips
+    # are 0.154 m apart, so this is a touch wider than hip width. It has to be
+    # constrained explicitly: nothing in the model stops the legs crossing,
+    # and MyoSuite ships foot-to-foot collision pairs that fire when they do.
+    stance_width: float = 0.17
+
     # Termination. The model stands with its pelvis near 0.98 m.
     min_pelvis_height: float = 0.65
     max_trunk_tilt: float = 1.20  # radians from vertical

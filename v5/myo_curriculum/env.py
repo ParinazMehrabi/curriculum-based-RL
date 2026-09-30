@@ -74,18 +74,65 @@ INDEPENDENT_JOINTS: Tuple[str, ...] = (
 
 FOOT_BODIES = ("calcn_r", "calcn_l")
 
-# Contact geometry, split fore/aft. The rear group sits on the calcn, the
-# forward group on the toes; `r_foot_col3` is the rearmost and is what has to
-# touch for the stance to be plantigrade rather than up on the forefoot.
+# --------------------------------------------------------------------------
+# Foot contact: two balls per foot, as in the OpenSim/SCONE cane model
+# --------------------------------------------------------------------------
 #
-# Heel and toe loads are reported separately because the difference between
-# them *is* gait phase -- heel strike, midstance, toe-off -- and a single
-# per-foot total throws that away.
-HEEL_GEOMS = {
+# The cane model this project is built around (models/hfd/Rajagopal2015_...hfd,
+# ported to MJCF in v4) gives each foot exactly two contact spheres:
+#
+#     heel_r  sphere r=0.03  on calcn_r  at (-0.085, -0.015, -0.005)
+#     toe_r   sphere r=0.03  on calcn_r  at (+0.085, -0.015,  0)
+#
+# MyoSuite's MyoFullBody instead wraps each foot in five capsules and an
+# ellipsoid. That is a different contact model: more geoms, a rolling sole
+# rather than two point-like supports, and no clean heel/toe split to read
+# gait phase from. This environment replaces it with the cane model's two
+# balls so contact behaves the way the rest of the project assumes.
+#
+# The MyoSuite geoms are not deleted, only taken out of collision
+# (contype/conaffinity = 0) and left in the visual group, so the foot still
+# renders as a foot.
+MYO_FOOT_GEOMS = (
+    "r_foot_col1", "r_foot_col3", "r_foot_col4", "r_bofoot_col1", "r_bofoot_col2",
+    "l_foot_col1", "l_foot_col3", "l_foot_col4", "l_bofoot_col1", "l_bofoot_col2",
+)
+
+BALL_RADIUS = 0.03  # the cane model's sphere radius, carried over unchanged
+
+# Where each ball sits, in its parent body's frame. Derived from this model's
+# own foot geometry -- the rearmost and forwardmost points of the MyoSuite
+# sole, dropped to the floor and raised by one ball radius -- rather than
+# copied from the .hfd, whose calcn frame is scaled and oriented differently.
+# scripts/derive_ball_contacts.py recomputes them; a test asserts the stance
+# they produce is plantigrade, so a stale value cannot pass silently.
+#
+# The heel ball goes on calcn and the toe ball on toes. The .hfd puts both on
+# calcn, but its own comment explains why that was free: "the mtp joint here
+# is locked 0..0 anyway, so this changes nothing kinematically". Here mtp is a
+# live joint with muscles crossing it, so the equivalent choice -- the one
+# that likewise changes nothing about how the foot rolls -- is to let the toe
+# ball follow the toes.
+BALL_CONTACTS = {
+    "heel_r": ("calcn_r", (+0.05562, +0.00954, +0.01421)),
+    "toe_r": ("toes_r", (+0.05718, +0.01003, +0.01353)),
+    "heel_l": ("calcn_l", (+0.04734, +0.00395, +0.00902)),
+    "toe_l": ("toes_l", (+0.05636, +0.01315, -0.01354)),
+}
+
+# One ball each, so the heel/toe split in contact_loads() is exact rather than
+# a grouping of capsules.
+HEEL_GEOMS = {"calcn_r": ("heel_r",), "calcn_l": ("heel_l",)}
+TOE_GEOMS = {"calcn_r": ("toe_r",), "calcn_l": ("toe_l",)}
+
+# The stock MyoSuite grouping, used when ball_contacts=False so the two
+# contact models can be compared. The rear group is on the calcn and the
+# forward group on the toes; `*_foot_col3` is the rearmost.
+MYO_HEEL_GEOMS = {
     "calcn_r": ("r_foot_col1", "r_foot_col3", "r_foot_col4"),
     "calcn_l": ("l_foot_col1", "l_foot_col3", "l_foot_col4"),
 }
-TOE_GEOMS = {
+MYO_TOE_GEOMS = {
     "calcn_r": ("r_bofoot_col1", "r_bofoot_col2"),
     "calcn_l": ("l_bofoot_col1", "l_bofoot_col2"),
 }
@@ -132,6 +179,7 @@ class MyoLocomotionEnv(gym.Env):
         self,
         stage: str = "A",
         model_path=None,
+        ball_contacts: bool = True,
         frame_skip: int = 10,
         include_prev_action: bool = True,
         include_activation: bool = True,
@@ -147,7 +195,10 @@ class MyoLocomotionEnv(gym.Env):
         if not path.is_file():
             raise FileNotFoundError("model not found: %s" % path)
         self.model_path = path
-        self.model = mujoco.MjModel.from_xml_path(str(path))
+        self.ball_contacts = bool(ball_contacts)
+        self.heel_geoms = HEEL_GEOMS if self.ball_contacts else MYO_HEEL_GEOMS
+        self.toe_geoms = TOE_GEOMS if self.ball_contacts else MYO_TOE_GEOMS
+        self.model = self._build_model(path, self.ball_contacts)
         self.data = mujoco.MjData(self.model)
 
         # Let render() ask for a sensible size without editing the XML.
@@ -207,6 +258,50 @@ class MyoLocomotionEnv(gym.Env):
 
     # -- model introspection ---------------------------------------------
 
+    @staticmethod
+    def _build_model(path, ball_contacts: bool):
+        """Compile the model, swapping the foot contact for two balls per foot.
+
+        Done through MjSpec rather than by editing a copy of MyoSuite's XML,
+        so there is no second model file to keep in step with the package and
+        no mesh paths to rewrite.
+        """
+        if not ball_contacts:
+            return mujoco.MjModel.from_xml_path(str(path))
+
+        spec = mujoco.MjSpec.from_file(str(path))
+        by_geom = {g.name: g for g in spec.geoms}
+        missing = [n for n in MYO_FOOT_GEOMS if n not in by_geom]
+        if missing:
+            raise RuntimeError(
+                "%s does not have the MyoSuite foot geoms this env expects to "
+                "replace: %s" % (Path(path).name, ", ".join(missing))
+            )
+        for name in MYO_FOOT_GEOMS:
+            geom = by_geom[name]
+            geom.contype = 0
+            geom.conaffinity = 0
+            geom.group = 1  # keep it visible, just not collidable
+
+        by_body = {b.name: b for b in spec.bodies}
+        for name, (body, pos) in BALL_CONTACTS.items():
+            if body not in by_body:
+                raise RuntimeError("body %r not found for contact ball %r" % (body, name))
+            ball = by_body[body].add_geom()
+            ball.name = name
+            ball.type = mujoco.mjtGeom.mjGEOM_SPHERE
+            ball.size = [BALL_RADIUS, 0.0, 0.0]
+            ball.pos = list(pos)
+            # Massless, like the .hfd's contact spheres. Left at the default
+            # density these four balls added 0.3 kg and shifted the feet's
+            # inertia, which is not what a contact primitive should do.
+            ball.density = 0.0
+            ball.contype = 1
+            ball.conaffinity = 1
+            ball.group = 3
+            ball.rgba = [0.9, 0.5, 0.2, 0.7]
+        return spec.compile()
+
     def _resolve_indices(self) -> None:
         m = self.model
         self.joint_qpos_adr: List[int] = []
@@ -259,7 +354,7 @@ class MyoLocomotionEnv(gym.Env):
         # match contact_loads().
         self._load_groups: List[set] = []
         for foot in FOOT_BODIES:
-            for table in (HEEL_GEOMS, TOE_GEOMS):
+            for table in (self.heel_geoms, self.toe_geoms):
                 ids = set()
                 for gname in table[foot]:
                     g = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, gname)
@@ -317,15 +412,44 @@ class MyoLocomotionEnv(gym.Env):
     # trunk-verticality components, with pelvis height, root pitch and root
     # roll as three further unknowns.
     _STANCE_VARS = (
-        "hip_flexion_r", "knee_angle_r", "ankle_angle_r",
-        "hip_flexion_l", "knee_angle_l", "ankle_angle_l",
+        "hip_flexion_r", "knee_angle_r", "ankle_angle_r", "hip_adduction_r",
+        "hip_flexion_l", "knee_angle_l", "ankle_angle_l", "hip_adduction_l",
         "flex_extension", "lat_bending",
     )
     _STANCE_ZERO = (
-        "hip_adduction_r", "hip_adduction_l", "hip_rotation_r", "hip_rotation_l",
+        "hip_rotation_r", "hip_rotation_l",
         "subtalar_angle_r", "subtalar_angle_l", "mtp_angle_r", "mtp_angle_l",
         "axial_rotation",
     )
+
+    def foot_stagger(self) -> float:
+        """Fore-aft offset between the two feet, in metres.
+
+        Zero is a parallel standing stance. Also constrained by the solve:
+        left free it settled on a 0.110 m split stance, which loads the feet
+        diagonally -- one heel and the opposite toe -- and left the other heel
+        touching the floor with no force at all on every reset.
+        """
+        forward = self.forward_axis()
+        delta = np.asarray(self.data.xipos[self.foot_ids[0]]) - np.asarray(
+            self.data.xipos[self.foot_ids[1]]
+        )
+        return float(delta @ forward)
+
+    def stance_width(self) -> float:
+        """Lateral distance between the two feet, in metres.
+
+        Constrained by the stance solve because nothing else stops the legs
+        crossing. With hip_adduction pinned to zero the solved stance put the
+        feet 0.055 m apart -- narrower than one foot is wide -- and MyoSuite's
+        foot-to-foot collision pair then fired with 569 N of spurious force,
+        which swamped the real ground reaction and starved one heel of load.
+        """
+        right = self.right_axis()
+        delta = np.asarray(self.data.xipos[self.foot_ids[0]]) - np.asarray(
+            self.data.xipos[self.foot_ids[1]]
+        )
+        return float(delta @ right)
 
     def _support_centroid(self) -> np.ndarray:
         """Horizontal centre of the base of support.
@@ -356,14 +480,14 @@ class MyoLocomotionEnv(gym.Env):
         return float(self.data.geom_xpos[g][2] - radius)
 
     def _heel_z(self, foot: str) -> float:
-        return min(self._geom_lowest_z(n) for n in HEEL_GEOMS[foot])
+        return min(self._geom_lowest_z(n) for n in self.heel_geoms[foot])
 
     def _toe_z(self, foot: str) -> float:
-        return min(self._geom_lowest_z(n) for n in TOE_GEOMS[foot])
+        return min(self._geom_lowest_z(n) for n in self.toe_geoms[foot])
 
     _SEAT_VARS = (
-        "hip_flexion_r", "knee_angle_r", "ankle_angle_r",
-        "hip_flexion_l", "knee_angle_l", "ankle_angle_l",
+        "hip_flexion_r", "knee_angle_r", "ankle_angle_r", "hip_adduction_r",
+        "hip_flexion_l", "knee_angle_l", "ankle_angle_l", "hip_adduction_l",
     )
 
     def _seat_feet(self, iterations: int = 60) -> None:
@@ -424,6 +548,8 @@ class MyoLocomotionEnv(gym.Env):
                 self._heel_z("calcn_r"), self._toe_z("calcn_r"),
                 self._heel_z("calcn_l"), self._toe_z("calcn_l"),
                 com[0] - mid[0], com[1] - mid[1],
+                self.stance_width() - self.stage_spec.stance_width,
+                self.foot_stagger(),
             ])
 
         x = np.concatenate([[d.qpos[a] for a in adr], [d.qpos[2]], [0.0, 0.0]])
@@ -514,11 +640,15 @@ class MyoLocomotionEnv(gym.Env):
                 self._heel_z("calcn_l"), self._toe_z("calcn_l"),
                 com[0] - mid[0], com[1] - mid[1],
                 up[0], up[1],
+                self.stance_width() - self.stage_spec.stance_width,
+                self.foot_stagger(),
             ])
 
         x = np.zeros(n_var + 3)
         x[self._STANCE_VARS.index("knee_angle_r")] = 0.10
         x[self._STANCE_VARS.index("knee_angle_l")] = 0.10
+        x[self._STANCE_VARS.index("hip_adduction_r")] = -0.05
+        x[self._STANCE_VARS.index("hip_adduction_l")] = -0.05
         x[n_var] = 0.95
         lo_b = np.array([l[0] for l in limits])
         hi_b = np.array([l[1] for l in limits])
@@ -527,7 +657,7 @@ class MyoLocomotionEnv(gym.Env):
         # the full solve from a pose whose feet are already flat is what makes
         # it converge; from the keyframe the COM and foot residuals pull
         # against each other and it wanders into the joint limits instead.
-        for n_res in (4, 8):
+        for n_res in (4, 10):
             for _ in range(200):
                 r = residual(x)[:n_res]
                 if np.abs(r).max() < 1e-7:
@@ -901,13 +1031,14 @@ class MyoLocomotionEnv(gym.Env):
     def describe(self) -> str:
         return (
             "%s | %s | %d muscles, %d independent joints, %.1f kg | "
-            "obs %d, act %d | dt %.3f s"
+            "%s | obs %d, act %d | dt %.3f s"
             % (
                 self.curriculum_stage,
                 self.model_path.name,
                 self.n_muscle,
                 len(INDEPENDENT_JOINTS),
                 self.body_weight / GRAVITY,
+                "2 contact balls/foot" if self.ball_contacts else "MyoSuite foot contacts",
                 self.observation_space.shape[0],
                 self.n_act,
                 self.dt,

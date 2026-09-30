@@ -16,7 +16,7 @@ v5/
   scripts/
     validate_env.py  smoke test: frame, Markov property, reward safety, gradient
     render.py        multi-view still or rollout figure
-  tests/          35 tests
+  tests/          42 tests
   figures/        rendered PNGs (referenced above)
 ```
 
@@ -130,6 +130,60 @@ The policy emits `[-1, 1]` and the environment maps it to activation `[0, 1]`,
 so **a zero action is half activation, not rest.** v4's action rate limiter is
 kept, and `prev_action` stays in the observation for the reason v4 documents.
 
+## Foot contact: two balls per foot, as in the cane model
+
+The `.hfd` cane model this project is built around gives each foot exactly two
+contact spheres -- `heel` and `toe`, radius 0.03, plus one per crutch tip.
+MyoSuite's MyoFullBody instead wraps each foot in five capsules and an
+ellipsoid: a rolling sole, with no clean heel/toe split to read gait phase
+from. This environment replaces MyoSuite's scheme with the cane model's two
+balls, so contact behaves the way the rest of the project assumes.
+
+The swap happens through `MjSpec` at construction, so there is no second model
+file to keep in step with the `myosuite` package and no mesh paths to rewrite.
+The MyoSuite geoms are not deleted, only taken out of collision, so the foot
+still renders as a foot. `ball_contacts=False` restores the stock scheme for a
+comparison; the heel/toe grouping follows the flag.
+
+The balls are **massless** (`density=0`): left at MuJoCo's default they added
+0.3 kg and shifted the feet's inertia, which is not what a contact primitive
+should do. Their positions come from this model's own sole geometry rather
+than the `.hfd` numbers, whose calcn frame is scaled and oriented differently;
+`BALL_CONTACTS` documents the derivation and a test pins the stance they give.
+
+The heel ball sits on `calcn` and the toe ball on `toes`. The `.hfd` puts both
+on `calcn`, but its own comment says why that was free -- "the mtp joint here
+is locked 0..0 anyway, so this changes nothing kinematically". Here mtp is a
+live joint with muscles crossing it, so the equivalent choice is to let the toe
+ball follow the toes.
+
+### What the swap exposed
+
+Reducing eleven contact geoms to four made a latent defect obvious. The solved
+stance had the feet **0.055 m apart laterally** -- narrower than one foot is
+wide -- because `hip_adduction` was pinned to zero and nothing constrained
+stance width. MyoSuite ships **14 leg-to-leg collision pairs**, and those
+bypass `contype`/`conaffinity` entirely, so disabling the foot geoms did not
+disable them: the foot-to-foot pair fired with **569 N** of spurious force,
+more than half body weight, swamping the real ground reaction.
+
+The stance solve now constrains stance width (0.17 m, a touch wider than the
+model's 0.154 m hips) and fore-aft alignment. Left free the latter settled on a
+0.110 m **split stance**, which loads the feet diagonally -- one heel and the
+opposite toe.
+
+### What is guaranteed, and what is not
+
+All four balls **touch** the floor at every reset, to about 1e-7 m, with no
+self-collision. Whether a given ball also **carries load** is the solver's to
+decide: four coplanar point contacts against three equilibrium equations is
+indeterminate -- the wobbly-table problem -- so one of them routinely comes out
+at zero even while touching. That is reported by `validate_env.py` rather than
+asserted.
+
+And the heels unload within a few steps, because the body pitches forward.
+Holding the stance is stage A's job, not the reset's.
+
 ## The standing stance is solved, not inherited
 
 The shipped keyframe is a **mid-stride pose, not a stance**: the hips differ by
@@ -148,8 +202,9 @@ Gauss-Newton over six leg angles, two trunk angles, pelvis height and root
 pitch/roll, against:
 
 - each foot's heel **and** toe at `z = 0` (plantigrade, both feet),
-- the COM horizontally over the **base of support**, and
-- the trunk axis vertical.
+- the COM horizontally over the **base of support**,
+- the trunk axis vertical, and
+- stance width and fore-aft foot alignment.
 
 It converges to a residual of about `1e-12`. `lat_bending` settles at
 -0.126 rad, which is the model taking up its own leg-length difference -- what

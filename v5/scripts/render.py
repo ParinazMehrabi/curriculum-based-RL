@@ -105,7 +105,7 @@ def compose(frames, labels, title, subtitle, footer, out: Path):
     BG, FG, MUTED = "#14161a", "#e8eaed", "#9aa0a6"
     n = len(frames)
     fig = plt.figure(figsize=(3.6 * n, 7.4), facecolor=BG)
-    gs = fig.add_gridspec(1, n, wspace=0.02, top=0.845, bottom=0.215,
+    gs = fig.add_gridspec(1, n, wspace=0.02, top=0.845, bottom=0.26,
                           left=0.015, right=0.985)
     for i, (img, label) in enumerate(zip(frames, labels)):
         ax = fig.add_subplot(gs[0, i])
@@ -116,7 +116,7 @@ def compose(frames, labels, title, subtitle, footer, out: Path):
         ax.set_title(label, color=FG, fontsize=12, pad=9)
     fig.suptitle(title, color=FG, fontsize=17, y=0.955, fontweight="bold")
     fig.text(0.5, 0.895, subtitle, color=MUTED, fontsize=10.5, ha="center")
-    fig.text(0.5, 0.095, footer, color=MUTED, fontsize=10.5, ha="center",
+    fig.text(0.5, 0.115, footer, color=MUTED, fontsize=10.5, ha="center",
              linespacing=1.9, family="monospace")
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=112, facecolor=BG)

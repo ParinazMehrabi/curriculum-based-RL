@@ -31,7 +31,13 @@ V5 = Path(__file__).resolve().parents[1]
 if str(V5) not in sys.path:
     sys.path.insert(0, str(V5))
 
-from myo_curriculum.env import INDEPENDENT_JOINTS, MyoLocomotionEnv  # noqa: E402
+import mujoco  # noqa: E402
+
+from myo_curriculum.env import (  # noqa: E402
+    BALL_RADIUS,
+    INDEPENDENT_JOINTS,
+    MyoLocomotionEnv,
+)
 from myo_curriculum.stages import STAGE_ORDER, get_stage  # noqa: E402
 
 
@@ -124,6 +130,26 @@ def main(argv=None) -> int:
         print()
         r.check(env.stance_residual < 1e-4, "stance solve converged",
                 "residual %.1e" % env.stance_residual)
+        r.check(env.ball_contacts, "two contact balls per foot",
+                "r=%.3f m, as in the .hfd cane model" % BALL_RADIUS)
+        env.reset(seed=0)
+        r.check(abs(env.stance_width() - env.stage_spec.stance_width) < 1e-3,
+                "stance is hip-width, legs not crossing",
+                "%.3f m" % env.stance_width())
+        r.check(abs(env.foot_stagger()) < 1e-3, "feet parallel, not staggered",
+                "%.1e m" % abs(env.foot_stagger()))
+        floor = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        offfloor = []
+        for seed in range(8):
+            env.reset(seed=seed)
+            for i in range(env.data.ncon):
+                c = env.data.contact[i]
+                if floor not in (c.geom1, c.geom2):
+                    offfloor.append(
+                        mujoco.mj_id2name(env.model, mujoco.mjtObj.mjOBJ_GEOM, c.geom1)
+                    )
+        r.check(not offfloor, "no self-collision at reset",
+                "MyoSuite ships 14 leg-to-leg pairs that bypass contype")
         worst_heel, worst_toe, loads, totals = 0.0, 0.0, [], []
         for seed in range(12):
             env.reset(seed=seed)
