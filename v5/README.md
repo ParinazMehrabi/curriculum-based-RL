@@ -20,8 +20,10 @@ v5/
   scripts/
     validate_env.py  smoke test: frame, planarity, contact, reward, gradient
     run_reward.py    run an episode, printing the reward term by term
+    train_ppo.py     recurrent PPO for the phase-gated policy
+    eval_checkpoint.py  run a checkpoint, print the best episode in full
     render.py        multi-view still or rollout figure
-  tests/          80 tests
+  tests/          89 tests
   figures/        rendered PNGs (referenced above)
 ```
 
