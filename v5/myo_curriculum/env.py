@@ -427,8 +427,12 @@ class MyoLocomotionEnv(gym.Env):
 
         Linear in distance and **open-ended**: there is no distance at which
         this stops paying, so further is always worth more. Covering twice
-        `forward_reference_distance` pays twice as much. It is signed, so
-        travelling backwards costs what travelling forwards earns.
+        `forward_reference_distance` pays twice as much.
+
+        It is signed and **asymmetric**: retreating costs
+        `backward_multiplier` times the rate at which advancing earns. Priced
+        symmetrically, a policy that topples backwards 0.27 m paid about the
+        same as one that stood still, which is why it kept doing it.
 
         Distance **times** survival. Distance alone is not enough: a trained
         policy learns to dive -- accelerate hard, bank the distance, fall. One
@@ -453,6 +457,8 @@ class MyoLocomotionEnv(gym.Env):
             return 0.0
         scale = spec.forward_reference_distance
         progress = self.travel / scale if scale > 0.0 else 0.0
+        if progress < 0.0:
+            progress *= spec.backward_multiplier
         survived = 1.0
         if spec.forward_requires_survival:
             survived = min(1.0, self.steps / max(1, spec.episode_steps))

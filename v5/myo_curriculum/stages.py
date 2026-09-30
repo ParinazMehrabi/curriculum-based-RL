@@ -120,6 +120,11 @@ class StageSpec:
     # only pays if it is held. Without it the policy dives: accelerate, bank
     # the distance, fall. See MyoLocomotionEnv.forward_bonus.
     forward_requires_survival: bool = True
+    # Retreating is charged at this multiple of the rate advancing earns. 1.0
+    # is symmetric; above it, ground given up costs more than the same ground
+    # gained is worth, which is what makes standing still preferable to
+    # toppling backwards rather than merely equal to it.
+    backward_multiplier: float = 1.0
 
     # Flying. With an open-ended distance reward the cheapest way to cover
     # ground is to stop touching it -- launch, travel ballistically, land. A
@@ -171,7 +176,10 @@ class StageSpec:
         if not overrides:
             return self
 
-        weights = dict(self.reward.weights)
+        # `weights=` replaces the whole set, which is how a caller adds a term
+        # this stage does not currently weight. `w_<term>= ` still only changes
+        # a weight that is already there, so a typo in one stays an error.
+        weights = dict(overrides.pop("weights", self.reward.weights))
         reward_fields = {}
         term_fields = {}
         stage_fields = {}
@@ -283,7 +291,11 @@ STAGE_B = StageSpec(
 #                                   there is no distance at which it stops
 #                                   paying. Height is capped instead, by
 #                                   fly_penalty.
-#   0.2  for following the gait  -> reference tracking, weight 0.20/step
+#   0.2  for following the gait  -> REMOVED. Tracking is gone, and with it
+#                                   reference-state initialisation: every
+#                                   episode starts from the same standing
+#                                   pose. The 0.20 now weights `effort`; see
+#                                   the reward spec below.
 #
 # Composed **additively**, not by v4's geometric mean. Geometrically, a
 # tracking term near zero early in training would gate the velocity term to
@@ -320,20 +332,35 @@ STAGE_B = StageSpec(
 STAGE_W = StageSpec(
     key="W",
     name=WALK_TRACK,
-    target_vel=0.142,           # the reference's own mean speed
+    target_vel=0.0,             # no velocity target; distance is paid at the end
     episode_steps=1000,         # 10 s at dt = 0.01
-    track_reference=True,
-    rsi=True,
+    # No reference tracking, and no reference-state initialisation with it:
+    # every episode starts from the same solved standing pose.
+    track_reference=False,
+    rsi=False,
+    max_tracking_error=None,    # nothing to be off by
+    # One pose, exactly. The reset noise is zero, so the only variation between
+    # episodes is the policy's own action sampling.
+    reset_position_std=0.0,
+    reset_velocity_std=0.0,
     initial_forward_velocity=0.10,
-    initial_forward_velocity_std=0.03,
+    initial_forward_velocity_std=0.0,
     forward_bonus=0.70,
     forward_reference_distance=1.00,  # 0.10 m/s for 10 s = one full payment
+    backward_multiplier=4.0,
     reward=RewardSpec(
         alive=0.10,
         shaping_scale=0.20,
         composition=ADDITIVE,
         fall_penalty=0.0,
-        weights={"tracking": 1.00},
+        # `effort` holds the 0.20 that tracking used to. RewardSpec requires at
+        # least one shaping term, and of the terms this env has it is the only
+        # one that is not a behavioural objective in its own right: `height`,
+        # `upright` and `velocity` would each pay for something the reward does
+        # not ask for, while effort only chooses among the many activation
+        # patterns that produce the same motion. This model has 290 muscles and
+        # is hugely overactuated; without it, co-contraction is free.
+        weights={"effort": 1.00},
     ),
 )
 

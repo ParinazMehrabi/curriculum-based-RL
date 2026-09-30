@@ -219,7 +219,8 @@ def test_falling_adds_no_penalty_of_its_own(env):
     scale = (STAGE_W.forward_bonus * STAGE_W.episode_steps
              / STAGE_W.forward_reference_distance)
     assert env.terminal_bonus == pytest.approx(
-        scale * env.travel * env.steps / STAGE_W.episode_steps
+        scale * env.travel * STAGE_W.backward_multiplier
+        * env.steps / STAGE_W.episode_steps
     )
 
 

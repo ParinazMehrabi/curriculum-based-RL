@@ -587,9 +587,28 @@ def track_env():
     e.close()
 
 
-def test_reference_loads_and_maps_onto_this_model(track_env):
+@pytest.fixture(scope="module")
+def tracking_env():
+    """Stage W with reference tracking switched back on.
+
+    Stage W does not track any more -- it starts from one standing pose and is
+    scored on surviving and on distance -- but the reference, the tracking term
+    and the tracking-error termination are all still live code, and this is what
+    keeps them tested. Turning them on is an override, not a separate stage.
+    """
+    e = MyoLocomotionEnv(
+        stage="W", seed=0,
+        track_reference=True, rsi=True, max_tracking_error=1.50,
+        reset_position_std=0.02, reset_velocity_std=0.02,
+        weights={"tracking": 1.00},
+    )
+    yield e
+    e.close()
+
+
+def test_reference_loads_and_maps_onto_this_model(tracking_env):
     """Hip and knee, both sides, over one phase-averaged cycle."""
-    ref = track_env.reference
+    ref = tracking_env.reference
     assert ref is not None
     assert TRACKED_JOINTS == (
         "hip_flexion_r", "knee_angle_r", "hip_flexion_l", "knee_angle_l",
@@ -600,23 +619,23 @@ def test_reference_loads_and_maps_onto_this_model(track_env):
     assert ref.condition == "transparent_WALKING"
 
 
-def test_the_reference_holds_no_pelvis_height(track_env):
+def test_the_reference_holds_no_pelvis_height(tracking_env):
     """The record has no height channel, and `pose_at` says so with None.
 
     Silently returning a number here -- the previous .sto reference's absolute
     pelvis height -- would place the model vertically from data that does not
     exist.
     """
-    joints, height = track_env.reference.pose_at(0.3)
+    joints, height = tracking_env.reference.pose_at(0.3)
     assert height is None
     assert joints.shape == (len(TRACKED_JOINTS),)
 
 
-def test_the_reference_is_in_this_model_s_joint_ranges(track_env):
+def test_the_reference_is_in_this_model_s_joint_ranges(tracking_env):
     """Knee flexion is positive here and negative in the source log."""
-    model = track_env.model
+    model = tracking_env.model
     for i in range(100):
-        joints, _ = track_env.reference.pose_at(i / 100.0)
+        joints, _ = tracking_env.reference.pose_at(i / 100.0)
         for name, value in zip(TRACKED_JOINTS, joints):
             jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
             lo, hi = model.jnt_range[jid]
@@ -641,7 +660,7 @@ def test_positive_pelvis_tilt_leans_forward():
         env.close()
 
 
-def test_rsi_stands_the_posed_frame_on_the_floor(track_env):
+def test_rsi_stands_the_posed_frame_on_the_floor(tracking_env):
     """The reference gives no height, so reset has to find one.
 
     Keeping the standing pelvis height instead leaves a flexed-knee frame
@@ -651,46 +670,46 @@ def test_rsi_stands_the_posed_frame_on_the_floor(track_env):
     """
     heights = []
     for seed in range(12):
-        track_env.reset(seed=seed)
+        tracking_env.reset(seed=seed)
         lowest = min(
-            min(track_env._heel_z(foot), track_env._toe_z(foot))
+            min(tracking_env._heel_z(foot), tracking_env._toe_z(foot))
             for foot in ("calcn_r", "calcn_l")
         )
         assert lowest == pytest.approx(0.0, abs=1e-9), "the lowest point touches"
-        assert track_env.com_height < track_env.stage_spec.fly_threshold
-        heights.append(track_env.pelvis_height)
+        assert tracking_env.com_height < tracking_env.stage_spec.fly_threshold
+        heights.append(tracking_env.pelvis_height)
     # the phase changes the height, so this is not the standing pose repeated
     assert max(heights) - min(heights) > 1e-3
 
 
-def test_rsi_starts_on_the_reference_pose(track_env):
+def test_rsi_starts_on_the_reference_pose(tracking_env):
     """Only reset noise should separate the model from the reference."""
     for seed in range(8):
-        track_env.reset(seed=seed)
-        assert track_env.tracking_error < 0.10
+        tracking_env.reset(seed=seed)
+        assert tracking_env.tracking_error < 0.10
 
 
-def test_rsi_does_not_seat_the_feet(track_env):
+def test_rsi_does_not_seat_the_feet(tracking_env):
     """Forcing a mid-swing frame plantigrade would corrupt it."""
     off_ground = 0
     for seed in range(12):
-        track_env.reset(seed=seed)
-        if max(track_env._heel_z("calcn_r"), track_env._heel_z("calcn_l")) > 1e-3:
+        tracking_env.reset(seed=seed)
+        if max(tracking_env._heel_z("calcn_r"), tracking_env._heel_z("calcn_l")) > 1e-3:
             off_ground += 1
     assert off_ground > 0, "a gait cycle should sometimes have a foot in the air"
 
 
-def test_reference_clock_advances_with_sim_time(track_env):
-    track_env.reset(seed=0)
-    start = track_env.ref_phase
+def test_reference_clock_advances_with_sim_time(tracking_env):
+    tracking_env.reset(seed=0)
+    start = tracking_env.ref_phase
     for _ in range(50):
-        track_env.step(np.zeros(track_env.n_act, np.float32))
-    advanced = (track_env.ref_phase - start) % 1.0
-    assert advanced == pytest.approx(50 * track_env.dt / track_env.reference.duration)
+        tracking_env.step(np.zeros(tracking_env.n_act, np.float32))
+    advanced = (tracking_env.ref_phase - start) % 1.0
+    assert advanced == pytest.approx(50 * tracking_env.dt / tracking_env.reference.duration)
 
 
-def test_reference_phase_wraps(track_env):
-    ref = track_env.reference
+def test_reference_phase_wraps(tracking_env):
+    ref = tracking_env.reference
     assert ref.advance(0.99, ref.duration * 0.02) == pytest.approx(0.01, abs=1e-9)
     a, _ = ref.pose_at(0.0)
     b, _ = ref.pose_at(1.0)
@@ -698,10 +717,13 @@ def test_reference_phase_wraps(track_env):
 
 
 def test_stage_w_maxima_are_the_ones_asked_for():
-    """alive 0.1, tracking 0.2 per step; forward 0.7 paid at the end.
+    """alive 0.1 and effort 0.2 per step; forward 0.7 for a metre, at the end.
 
-    Over a full episode that is 100 + 200 + 700 = 1000, the same proportions
-    as a 1.0/step reward with the forward share moved to the end.
+    Over an episode covering the reference distance that is 100 + 200 + 700 =
+    1000, the same proportions as a 1.0/step reward with the forward share
+    moved to the end -- except forward has no ceiling, so 1000 is a reference
+    point rather than a maximum. The 0.2 was tracking's; tracking is gone and
+    effort holds it.
     """
     stage = STAGES["W"]
     spec = stage.reward
@@ -711,21 +733,50 @@ def test_stage_w_maxima_are_the_ones_asked_for():
         for name, w in spec.active_weights.items()
     }
     assert spec.alive == pytest.approx(0.10)
-    assert caps["tracking"] == pytest.approx(0.20)
+    assert set(caps) == {"effort"}, "tracking is removed"
+    assert caps["effort"] == pytest.approx(0.20)
     assert spec.alive + sum(caps.values()) == pytest.approx(0.30)
 
-    terminal = stage.forward_bonus * stage.episode_steps
-    assert terminal == pytest.approx(700.0)
-    episode = 0.30 * stage.episode_steps + terminal
-    assert episode == pytest.approx(1000.0)
+    full_distance = stage.forward_bonus * stage.episode_steps
+    assert full_distance == pytest.approx(700.0)
+    assert 0.30 * stage.episode_steps + full_distance == pytest.approx(1000.0)
+
+
+def test_stage_w_starts_from_exactly_one_pose():
+    """No reference, no RSI, and no reset noise: the same state every episode.
+
+    The only variation left between episodes is the policy's own action
+    sampling, which is where exploration belongs.
+    """
+    stage = STAGES["W"]
+    assert not stage.track_reference
+    assert not stage.rsi
+    assert stage.max_tracking_error is None
+    assert stage.reset_position_std == 0.0
+    assert stage.reset_velocity_std == 0.0
+    assert stage.initial_forward_velocity_std == 0.0
+
+    env = MyoLocomotionEnv(stage="W", seed=0)
+    try:
+        assert env.reference is None
+        first, _ = env.reset(seed=0)
+        reference_pose = env.data.qpos.copy()
+        for seed in (1, 2, 99):
+            env.reset(seed=seed)
+            assert np.array_equal(env.data.qpos, reference_pose)
+            assert np.array_equal(env.data.qvel, env.data.qvel)
+        again, _ = env.reset(seed=12345)
+        assert np.allclose(first, again)
+    finally:
+        env.close()
 
 
 def test_stage_w_is_additive_not_geometric():
-    """Geometric composition would gate the alive bonus on early tracking."""
+    """Geometric composition would gate the alive bonus on the shaping term."""
     spec = STAGES["W"].reward
     assert spec.composition == "additive"
-    total, _ = spec.compose({"tracking": 0.0})
-    assert total >= spec.alive, "surviving should score even with no tracking"
+    total, _ = spec.compose({"effort": 0.0})
+    assert total >= spec.alive, "surviving should score on its own"
 
 
 def test_forward_progress_is_paid_at_the_end_not_per_step(track_env):
@@ -790,9 +841,17 @@ def test_forward_bonus_is_linear_and_open_ended(track_env):
     assert seen[5.0] > seen[2.0] > seen[1.0], "further is always worth more"
 
 
-def test_walking_backwards_costs_what_walking_forwards_earns(track_env):
-    """The forward term is signed, so retreating is not merely unrewarded."""
+def test_walking_backwards_costs_more_than_walking_forwards_earns(track_env):
+    """Retreating is charged at `backward_multiplier` times the forward rate.
+
+    Symmetric pricing was not enough. Measured at iteration 433 of a real run,
+    a policy that toppled 0.273 m backwards over 85 steps collected about -10,
+    against +100 for simply standing for the full episode -- so backwards was
+    cheap, and it kept going there. At 4x the same topple costs -65, and the
+    gap to standing still is 165 rather than 110.
+    """
     stage = track_env.stage_spec
+    assert stage.backward_multiplier > 1.0
     track_env.reset(seed=0)
     base = track_env._start_tx
     track_env.steps = stage.episode_steps
@@ -801,7 +860,12 @@ def test_walking_backwards_costs_what_walking_forwards_earns(track_env):
     forwards = track_env.forward_bonus()
     track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base - 0.4
     backwards = track_env.forward_bonus()
-    assert backwards == pytest.approx(-forwards)
+
+    assert forwards > 0.0 > backwards
+    assert backwards == pytest.approx(-stage.backward_multiplier * forwards)
+    # still linear on each side, so the gradient never vanishes
+    track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base - 0.8
+    assert track_env.forward_bonus() == pytest.approx(2 * backwards)
 
 
 def test_travel_is_the_root_not_the_com(track_env):
@@ -817,17 +881,17 @@ def test_travel_is_the_root_not_the_com(track_env):
     assert track_env.travel == pytest.approx(0.37)
 
 
-def test_velocity_term_is_a_smoothstep_that_saturates(track_env):
+def test_velocity_term_is_a_smoothstep_that_saturates(tracking_env):
     """A hard threshold at 0.1 m/s would have no gradient from a standstill."""
-    track_env.reset(seed=0)
+    tracking_env.reset(seed=0)
     seen = []
     for v in (0.0, 0.025, 0.05, 0.075, 0.10, 0.30):
         # Zero every other dof: forward_velocity reads the COM, so leftover
         # joint velocity from reset noise would shift it off the root's.
-        track_env.data.qvel[:] = 0.0
-        track_env.data.qvel[track_env.dadr["pelvis_tx"]] = v
-        mujoco.mj_forward(track_env.model, track_env.data)
-        seen.append(track_env._term_velocity())
+        tracking_env.data.qvel[:] = 0.0
+        tracking_env.data.qvel[tracking_env.dadr["pelvis_tx"]] = v
+        mujoco.mj_forward(tracking_env.model, tracking_env.data)
+        seen.append(tracking_env._term_velocity())
     assert seen[0] == pytest.approx(0.0, abs=1e-6)
     assert all(b >= a for a, b in zip(seen, seen[1:])), "must be monotone"
     assert 0.0 < seen[1] < seen[2] < seen[3] < 1.0, "gradient below the gate"
@@ -835,25 +899,25 @@ def test_velocity_term_is_a_smoothstep_that_saturates(track_env):
     assert seen[5] == pytest.approx(1.0), "saturates above the gate"
 
 
-def test_tracking_term_is_one_on_the_reference_and_falls_off(track_env):
-    track_env.reset(seed=0)
-    track_env.apply_reference_pose(track_env.ref_phase)
-    track_env.tracking_error = track_env.reference_error()
-    on_ref = track_env._term_tracking()
+def test_tracking_term_is_one_on_the_reference_and_falls_off(tracking_env):
+    tracking_env.reset(seed=0)
+    tracking_env.apply_reference_pose(tracking_env.ref_phase)
+    tracking_env.tracking_error = tracking_env.reference_error()
+    on_ref = tracking_env._term_tracking()
     assert on_ref > 0.99
 
-    track_env.data.qpos[track_env.qadr["hip_flexion_r"]] += 0.6
-    mujoco.mj_forward(track_env.model, track_env.data)
-    track_env.tracking_error = track_env.reference_error()
-    assert track_env._term_tracking() < on_ref
+    tracking_env.data.qpos[tracking_env.qadr["hip_flexion_r"]] += 0.6
+    mujoco.mj_forward(tracking_env.model, tracking_env.data)
+    tracking_env.tracking_error = tracking_env.reference_error()
+    assert tracking_env._term_tracking() < on_ref
 
 
-def test_early_termination_on_tracking_error(track_env):
+def test_early_termination_on_tracking_error(tracking_env):
     """Otherwise the policy banks alive and velocity return from a desynced state."""
-    track_env.reset(seed=0)
-    assert not track_env._is_fallen()
-    track_env.tracking_error = track_env.stage_spec.max_tracking_error + 0.01
-    assert track_env._is_fallen()
+    tracking_env.reset(seed=0)
+    assert not tracking_env._is_fallen()
+    tracking_env.tracking_error = tracking_env.stage_spec.max_tracking_error + 0.01
+    assert tracking_env._is_fallen()
 
 
 def test_stage_w_reward_is_never_negative_while_alive(track_env):
@@ -934,7 +998,7 @@ def test_flying_costs_more_than_a_step_is_worth(track_env):
     assert stage.fly_penalty * 0.10 > per_step
 
 
-def test_the_reference_gait_never_trips_the_fly_penalty(track_env):
+def test_the_reference_gait_never_trips_the_fly_penalty(tracking_env):
     """No frame of the gait, standing on the floor, counts as flying.
 
     Seated the way reset seats it: `apply_reference_pose` sets hip and knee
@@ -944,11 +1008,11 @@ def test_the_reference_gait_never_trips_the_fly_penalty(track_env):
     """
     highest = 0.0
     for i in range(100):
-        track_env.apply_reference_pose(i / 100.0)
-        track_env.seat_lowest_contact()
-        highest = max(highest, track_env.com_height)
-        assert track_env.fly_penalty() == 0.0, i
-    assert highest < track_env.stage_spec.fly_threshold
+        tracking_env.apply_reference_pose(i / 100.0)
+        tracking_env.seat_lowest_contact()
+        highest = max(highest, tracking_env.com_height)
+        assert tracking_env.fly_penalty() == 0.0, i
+    assert highest < tracking_env.stage_spec.fly_threshold
     assert highest == pytest.approx(0.974, abs=0.01)
 
 
@@ -995,7 +1059,7 @@ def test_forward_bonus_survival_factor_saturates_at_the_episode_length(track_env
     assert track_env.forward_bonus() == pytest.approx(full)
 
 
-def test_tracking_threshold_is_a_backstop_not_the_main_terminator(track_env):
+def test_tracking_threshold_is_a_backstop_not_the_main_terminator(tracking_env):
     """Measured: at 0.80 it ended 13 of 20 episodes at a mean of 32 steps.
 
     At 1.5 it never fires and every episode ends on trunk tilt at 39; above
@@ -1003,4 +1067,4 @@ def test_tracking_threshold_is_a_backstop_not_the_main_terminator(track_env):
     drifting off the reference while upright, rather than the thing that ends
     most episodes.
     """
-    assert track_env.stage_spec.max_tracking_error == pytest.approx(1.50)
+    assert tracking_env.stage_spec.max_tracking_error == pytest.approx(1.50)

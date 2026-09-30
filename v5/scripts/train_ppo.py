@@ -326,6 +326,8 @@ def parse_args(argv=None):
                    help="RMS joint deviation that ends an episode (stage default 1.5)")
     p.add_argument("--forward-bonus", type=float, default=None,
                    help="per-step-equivalent weight of the terminal forward payment")
+    p.add_argument("--backward-multiplier", type=float, default=None,
+                   help="retreating costs this multiple of what advancing earns")
     p.add_argument("--fly-penalty", type=float, default=None,
                    help="cost per metre of COM height above --fly-threshold, "
                         "per step; the only cap on the open-ended forward term")
@@ -359,6 +361,8 @@ def main(argv=None) -> int:
         overrides["forward_bonus"] = args.forward_bonus
     if args.fall_penalty is not None:
         overrides["fall_penalty"] = args.fall_penalty
+    if args.backward_multiplier is not None:
+        overrides["backward_multiplier"] = args.backward_multiplier
     if args.fly_penalty is not None:
         overrides["fly_penalty"] = args.fly_penalty
     if args.fly_threshold is not None:
@@ -609,12 +613,19 @@ def main(argv=None) -> int:
                       % (log_path.name, exc))
 
             if args.phases > 1:
-                align = phase_alignment(
-                    belief, torch.as_tensor(buf_phase), n_bins=args.phases
-                )
-                print("   phase vs reference cycle (rows = expert, cols = cycle bin):")
-                for k in range(args.phases):
-                    print("     %d  %s" % (k, "  ".join("%.2f" % v for v in align[k])))
+                # The alignment table compares what the gate believes against
+                # the reference's own cycle position, so it only says anything
+                # when there is a reference. Without one every step reports
+                # phase 0 and the table is a column of ones next to zeros.
+                if envs.envs[0].reference is not None:
+                    align = phase_alignment(
+                        belief, torch.as_tensor(buf_phase), n_bins=args.phases
+                    )
+                    print("   phase vs reference cycle "
+                          "(rows = expert, cols = cycle bin):")
+                    for k in range(args.phases):
+                        print("     %d  %s"
+                              % (k, "  ".join("%.2f" % v for v in align[k])))
                 print("   transition matrix:")
                 for k, r_ in enumerate(net.gate.transition_matrix().numpy()):
                     print("     %d  %s" % (k, "  ".join("%.2f" % v for v in r_)))
