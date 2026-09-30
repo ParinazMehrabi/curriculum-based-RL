@@ -11,13 +11,15 @@ this project is built around.
 v5/
   myo_curriculum/
     rewards.py    loads v4's reward primitives (not a copy -- see below)
-    stages.py     the two stages, as data
+    stages.py     the stages, as data
+    reference.py  the reference gait, mapped onto this model
     env.py        the single environment class
     __init__.py   gymnasium registration + variant helper
   scripts/
-    validate_env.py  smoke test: frame, Markov property, reward safety, gradient
+    validate_env.py  smoke test: frame, planarity, contact, reward, gradient
+    run_reward.py    run an episode, printing the reward term by term
     render.py        multi-view still or rollout figure
-  tests/          42 tests
+  tests/          55 tests
   figures/        rendered PNGs (referenced above)
 ```
 
@@ -39,9 +41,26 @@ uv pip install --python .venv-myo/Scripts/python.exe myosuite pytest matplotlib 
 Then, from `v5/`:
 
 ```bash
-../.venv-myo/Scripts/python.exe scripts/validate_env.py
+# watch the reward, term by term, every step
+../.venv-myo/Scripts/python.exe scripts/run_reward.py --stage W
+
+# every 10th step, 400 steps, random muscle activation
+../.venv-myo/Scripts/python.exe scripts/run_reward.py --stage W --every 10 --steps 400 --policy random
+
+# checks; figures; tests
+../.venv-myo/Scripts/python.exe scripts/validate_env.py --stage W
 ../.venv-myo/Scripts/python.exe scripts/render.py
 ../.venv-myo/Scripts/python.exe -m pytest tests -q
+```
+
+`run_reward.py` prints one line per step -- the total with its share of the
+maximum, then each term's **contribution** and its share of the maximum it
+could contribute. A term at 100% is saturated and is no longer a source of
+gradient:
+
+```
+step   12: reward +0.8149 ( 81.5% of max): alive 0.100 (100.0%)  tracking 0.005 (  2.6%)
+           velocity 0.700 (100.0%)  | v +0.130 m/s  | phase 0.666  err 0.669 rad
 ```
 
 Nothing here needs SCONE, sconegym, sconepy or a Hyfydy licence. The model
@@ -279,6 +298,83 @@ asserted.
 
 And the heels unload within a few steps, because the body pitches forward.
 Holding the stance is stage A's job, not the reset's.
+
+## Stage W: the walking reward
+
+| | asked for | implemented |
+|---|---|---|
+| falling | big penalty | early termination + `fall_penalty = 5.0` |
+| surviving 10 s | 0.1 | `alive = 0.10`/step over 1000 steps (10 s at dt 0.01) |
+| moving > 0.1 m/s | 0.7 | `smoothstep(v, 0, 0.10)`, weight 0.70 |
+| following the trajectory | 0.2 | reference tracking, weight 0.20 |
+| | | **max 1.00 per step** |
+
+Three departures from the literal spec, each for a reason:
+
+**A hard threshold at 0.1 m/s has no gradient from a standing start.** The
+policy begins at 0 m/s, scores nothing, and never learns to move -- the trap
+v4's stage D fell into. `smoothstep` ramps 0 → 1 over 0 → 0.1 m/s and saturates
+above, so it still rewards "faster than 0.1" but has gradient below it.
+
+**A bonus paid only at 10 s is too sparse.** 1000 steps is a long way to carry
+credit. It is a `0.10`/step alive bonus instead -- same total, dense signal.
+
+**A big fall penalty freezes the policy.** With early termination, falling
+already forfeits the rest of the episode, up to ~900 steps at ~1.0. That *is*
+the penalty. A large explicit one on top makes standing still beat any policy
+that risks moving. `RewardSpec.termination_report()` checks this.
+
+### Additive, not geometric
+
+v4 composes terms as a weighted geometric mean so no term can be farmed alone.
+Here that would be wrong: tracking is near zero early in training, and
+geometrically it would gate velocity to zero too, so neither would learn.
+
+Stage W is additive. The weights already encode the priority -- standing still
+scores 0.10, moving 0.80, moving on the reference 1.00 -- and because
+`alive + shaping_scale = 1` with weights summing to 0.90, the weighted
+arithmetic mean puts velocity's maximum at exactly 0.70 and tracking's at 0.20.
+
+### The reference
+
+`reference.py` maps `models/reference/gaitTracking_solution_raw.sto` onto this
+model. Two parts of that mapping are not identities:
+
+- **`pelvis_tilt` is sign-flipped.** The `.hfd` uses OpenSim's convention where
+  negative is a forward lean; this model's hinge is positive-forward. Measured,
+  not assumed. Everything else agrees, which is why this reference fits the
+  MyoSuite joint ranges -- **0 of 9 dofs out of range** -- when it did not fit
+  the `.hfd`'s at all (v4 README, section 11).
+- **`pelvis_ty` is a height, not a joint value.** Here it is a slide offset
+  from the root body, and the offset depends on `pelvis_tilt`, so the reference
+  height is solved against the posed model. RSI lands the pelvis to 1e-16 m.
+
+The record is not exactly cyclic -- it is tracked from real data. The best wrap
+is frame 195 (4.16 s), where the pose differs from frame 0 by 0.30 rad over
+nine dofs. Tracking dips briefly at the seam; `Reference(loop_end=...)` moves it.
+
+**RSI** starts each episode at a uniform random phase, posed on the reference.
+The feet are deliberately *not* seated -- forcing a mid-swing frame plantigrade
+would corrupt it. **Early termination** fires above 0.80 rad RMS joint
+deviation, so the policy never banks alive and velocity return from a state
+that has nothing to do with the reference.
+
+### One thing to know before training
+
+`velocity` saturates immediately. The reference walks at 0.142 m/s and the gate
+is 0.10, so **anything moving forward -- including falling forward -- collects
+the full 0.70**. `validate_env.py --stage W` says so:
+
+```
+    tracking   0.9993  <-- saturated, no gradient
+    velocity   1.0000  <-- saturated, no gradient
+```
+
+That is what was asked for and it is defensible -- the 0.70 is a
+survival-plus-progress bonus, and `tracking` plus early termination is what
+separates walking from toppling. But the *learning signal* lives almost
+entirely in the 0.20 tracking term. If training stalls, raise `velocity_gate`
+toward 0.3 m/s so the term has gradient through the useful range.
 
 ## Three things that were wrong first, and are now tested
 

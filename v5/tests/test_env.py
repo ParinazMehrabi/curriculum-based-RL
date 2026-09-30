@@ -33,6 +33,7 @@ from myo_curriculum.env import (  # noqa: E402
     ROOT_JOINTS,
     MyoLocomotionEnv,
 )
+from myo_curriculum.reference import TRACKED_JOINTS  # noqa: E402
 from myo_curriculum.stages import STAGE_ORDER, STAGES, TermParams, get_stage  # noqa: E402
 
 
@@ -573,3 +574,163 @@ def test_contact_balls_are_massless(env):
     """
     assert env.body_weight / 9.81 == pytest.approx(82.038, abs=0.02)
 
+
+
+# -- reference tracking (stage W) ------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def track_env():
+    e = MyoLocomotionEnv(stage="W", seed=0)
+    yield e
+    e.close()
+
+
+def test_reference_loads_and_maps_onto_this_model(track_env):
+    ref = track_env.reference
+    assert ref is not None
+    assert ref.n_frames == 195
+    assert len(TRACKED_JOINTS) == 8
+    assert ref.joints.shape == (195, 8)
+
+
+def test_pelvis_tilt_is_sign_flipped_from_the_hfd():
+    """Measured, not assumed.
+
+    The .hfd uses OpenSim's convention where negative pelvis_tilt is a forward
+    lean; this model's pelvis_tilt hinge is positive-forward. Getting this
+    backwards would invert the trunk posture the tracking term asks for.
+    """
+    from myo_curriculum.reference import JOINT_MAP
+
+    assert JOINT_MAP["pelvis_tilt"] == ("pelvis_tilt", -1.0)
+    for ref_dof, (_, sign) in JOINT_MAP.items():
+        if ref_dof != "pelvis_tilt":
+            assert sign == +1.0, ref_dof
+
+    env = MyoLocomotionEnv(stage="A", seed=0)
+    try:
+        def trunk_x(value):
+            env.reset(seed=0)
+            env.data.qpos[env.qadr["pelvis_tilt"]] = value
+            mujoco.mj_forward(env.model, env.data)
+            return float(env.trunk_axis()[0])
+
+        assert trunk_x(+0.30) > trunk_x(-0.30), "positive tilt should lean forward"
+    finally:
+        env.close()
+
+
+def test_rsi_places_the_pelvis_at_the_reference_height(track_env):
+    for seed in range(8):
+        track_env.reset(seed=seed)
+        target = track_env.reference.pose_at(track_env.ref_phase)[1]
+        assert track_env.pelvis_height == pytest.approx(target, abs=1e-9)
+
+
+def test_rsi_starts_on_the_reference_pose(track_env):
+    """Only reset noise should separate the model from the reference."""
+    for seed in range(8):
+        track_env.reset(seed=seed)
+        assert track_env.tracking_error < 0.10
+
+
+def test_rsi_does_not_seat_the_feet(track_env):
+    """Forcing a mid-swing frame plantigrade would corrupt it."""
+    off_ground = 0
+    for seed in range(12):
+        track_env.reset(seed=seed)
+        if max(track_env._heel_z("calcn_r"), track_env._heel_z("calcn_l")) > 1e-3:
+            off_ground += 1
+    assert off_ground > 0, "a gait cycle should sometimes have a foot in the air"
+
+
+def test_reference_clock_advances_with_sim_time(track_env):
+    track_env.reset(seed=0)
+    start = track_env.ref_phase
+    for _ in range(50):
+        track_env.step(np.zeros(track_env.n_act, np.float32))
+    advanced = (track_env.ref_phase - start) % 1.0
+    assert advanced == pytest.approx(50 * track_env.dt / track_env.reference.duration)
+
+
+def test_reference_phase_wraps(track_env):
+    ref = track_env.reference
+    assert ref.advance(0.99, ref.duration * 0.02) == pytest.approx(0.01, abs=1e-9)
+    a, _ = ref.pose_at(0.0)
+    b, _ = ref.pose_at(1.0)
+    assert np.allclose(a, b)
+
+
+def test_stage_w_maxima_are_the_ones_asked_for():
+    """alive 0.10, velocity 0.70, tracking 0.20, summing to exactly 1.00."""
+    spec = STAGES["W"].reward
+    total_w = sum(spec.active_weights.values())
+    caps = {
+        name: spec.shaping_scale * w / total_w
+        for name, w in spec.active_weights.items()
+    }
+    assert spec.alive == pytest.approx(0.10)
+    assert caps["velocity"] == pytest.approx(0.70)
+    assert caps["tracking"] == pytest.approx(0.20)
+    assert spec.alive + sum(caps.values()) == pytest.approx(1.00)
+
+
+def test_stage_w_is_additive_not_geometric():
+    """Geometric composition would gate velocity to zero on early tracking."""
+    spec = STAGES["W"].reward
+    assert spec.composition == "additive"
+    total, _ = spec.compose({"velocity": 1.0, "tracking": 0.0})
+    assert total > 0.7, "a good walk with no tracking should still score"
+
+
+def test_velocity_term_is_a_smoothstep_that_saturates(track_env):
+    """A hard threshold at 0.1 m/s would have no gradient from a standstill."""
+    track_env.reset(seed=0)
+    seen = []
+    for v in (0.0, 0.025, 0.05, 0.075, 0.10, 0.30):
+        # Zero every other dof: forward_velocity reads the COM, so leftover
+        # joint velocity from reset noise would shift it off the root's.
+        track_env.data.qvel[:] = 0.0
+        track_env.data.qvel[track_env.dadr["pelvis_tx"]] = v
+        mujoco.mj_forward(track_env.model, track_env.data)
+        seen.append(track_env._term_velocity())
+    assert seen[0] == pytest.approx(0.0, abs=1e-6)
+    assert all(b >= a for a, b in zip(seen, seen[1:])), "must be monotone"
+    assert 0.0 < seen[1] < seen[2] < seen[3] < 1.0, "gradient below the gate"
+    assert seen[4] == pytest.approx(1.0)
+    assert seen[5] == pytest.approx(1.0), "saturates above the gate"
+
+
+def test_tracking_term_is_one_on_the_reference_and_falls_off(track_env):
+    track_env.reset(seed=0)
+    track_env.apply_reference_pose(track_env.ref_phase)
+    track_env.tracking_error = track_env.reference_error()
+    on_ref = track_env._term_tracking()
+    assert on_ref > 0.99
+
+    track_env.data.qpos[track_env.qadr["hip_flexion_r"]] += 0.6
+    mujoco.mj_forward(track_env.model, track_env.data)
+    track_env.tracking_error = track_env.reference_error()
+    assert track_env._term_tracking() < on_ref
+
+
+def test_early_termination_on_tracking_error(track_env):
+    """Otherwise the policy banks alive and velocity return from a desynced state."""
+    track_env.reset(seed=0)
+    assert not track_env._is_fallen()
+    track_env.tracking_error = track_env.stage_spec.max_tracking_error + 0.01
+    assert track_env._is_fallen()
+
+
+def test_stage_w_reward_is_never_negative_while_alive(track_env):
+    track_env.reset(seed=0)
+    for _ in range(200):
+        _, reward, term, trunc, _ = track_env.step(
+            np.full(track_env.n_act, -0.6, np.float32)
+        )
+        if term:
+            break
+        assert reward >= 0.0
+        if trunc:
+            break

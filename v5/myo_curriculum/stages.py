@@ -20,12 +20,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Dict, Mapping, Tuple
 
-from .rewards import GEOMETRIC, RewardSpec
+from .rewards import ADDITIVE, GEOMETRIC, RewardSpec
 
 STAND = "A-stand"
 WALK = "B-walk"
+WALK_TRACK = "W-walk-track"
 
-STAGE_ORDER: Tuple[str, ...] = ("A", "B")
+STAGE_ORDER: Tuple[str, ...] = ("A", "B", "W")
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,18 @@ class TermParams:
     effort_target: float = 0.15
     effort_sigma: float = 0.25
 
+    # velocity_gate: the speed at which the forward term saturates, m/s. Used
+    # by stage W, where velocity is a smoothstep from 0 to this rather than a
+    # Gaussian around a target. "Reward for moving faster than 0.1 m/s" as a
+    # hard threshold would have no gradient at all from a standing start,
+    # which is the trap v4's stage D fell into; smoothstep keeps the gradient
+    # and still saturates at the asked-for speed.
+    velocity_gate: float = 0.10
+
+    # tracking: RMS joint deviation from the reference frame, in radians,
+    # at which the term has fallen to 1/e.
+    tracking_sigma: float = 0.35
+
 
 @dataclass(frozen=True)
 class StageSpec:
@@ -57,6 +70,18 @@ class StageSpec:
 
     target_vel: float = 0.0
     episode_steps: int = 1000
+
+    # Reference tracking. `track_reference` turns on the tracking term and the
+    # reference clock; `rsi` starts each episode at a random phase of the
+    # reference instead of the solved standing stance, which is what makes
+    # imitation tractable and, incidentally, gives a phase-discovering gate a
+    # balanced sample of phases for free.
+    track_reference: bool = False
+    rsi: bool = False
+    rsi_velocity_scale: float = 0.0
+    # Terminate when the RMS joint deviation from the reference exceeds this,
+    # so the policy never banks return from a desynced state. None disables it.
+    max_tracking_error: float = 0.80
 
     # Stance width needs no parameter any more: hip adduction is pinned to
     # zero by the planar constraint, so the feet sit at the model's own hip
@@ -192,7 +217,50 @@ STAGE_B = StageSpec(
     ),
 )
 
-STAGES: Dict[str, StageSpec] = {"A": STAGE_A, "B": STAGE_B}
+# Stage W: the reward the project actually asked for.
+#
+#   big penalty for falling      -> early termination plus a small explicit
+#                                   penalty; see below
+#   0.1  for surviving 10 s      -> 0.10/step alive bonus over 1000 steps
+#   0.7  for moving > 0.1 m/s    -> smoothstep(v, 0, 0.10), weight 0.70
+#   0.2  for following the gait  -> reference tracking, weight 0.20
+#
+# Composed **additively**, not by v4's geometric mean. Geometrically, a
+# tracking term near zero early in training would gate the velocity term to
+# zero as well and neither would learn. Additively the weights already encode
+# the priority: standing still scores 0.10, moving scores 0.80, moving on the
+# reference scores 1.00.
+#
+# alive + shaping_scale = 1.0 and the weights sum to 0.90, so the weighted
+# arithmetic mean puts velocity's maximum contribution at exactly 0.70 and
+# tracking's at 0.20, which is what was asked for.
+#
+# fall_penalty stays small on purpose. With early termination, falling already
+# forfeits the rest of the episode -- up to ~900 steps at ~1.0 -- and that is
+# the real penalty. A large explicit one on top makes standing still dominate
+# any policy that risks moving. RewardSpec.termination_report() checks this.
+STAGE_W = StageSpec(
+    key="W",
+    name=WALK_TRACK,
+    target_vel=0.142,           # the reference's own mean speed
+    episode_steps=1000,         # 10 s at dt = 0.01
+    track_reference=True,
+    rsi=True,
+    initial_forward_velocity=0.10,
+    initial_forward_velocity_std=0.03,
+    reward=RewardSpec(
+        alive=0.10,
+        shaping_scale=0.90,
+        composition=ADDITIVE,
+        fall_penalty=5.0,
+        weights={
+            "velocity": 0.70,
+            "tracking": 0.20,
+        },
+    ),
+)
+
+STAGES: Dict[str, StageSpec] = {"A": STAGE_A, "B": STAGE_B, "W": STAGE_W}
 
 
 def get_stage(key: str) -> StageSpec:

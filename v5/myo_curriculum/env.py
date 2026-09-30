@@ -70,7 +70,8 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("v5 needs gymnasium: pip install gymnasium") from exc
 
-from .rewards import gaussian
+from .reference import TRACKED_JOINTS, Reference
+from .rewards import gaussian, smoothstep
 from .stages import StageSpec, get_stage
 
 GRAVITY = 9.81
@@ -214,6 +215,15 @@ class MyoLocomotionEnv(gym.Env):
         self.stance_residual = float("nan")
         self.seat_residual = float("nan")
         self._neutral_qpos, self._neutral_height = self._solve_stance_pose()
+
+        # Reference gait, loaded only when a stage tracks it.
+        self.reference: Optional[Reference] = None
+        self.ref_phase = 0.0
+        self.tracking_error = 0.0
+        self._tracked_qadr = [self.qadr[n] for n in TRACKED_JOINTS]
+        if self.stage_spec.track_reference:
+            self.reference = Reference()
+
 
         self.render_mode = render_mode
         self._renderer = None
@@ -543,6 +553,35 @@ class MyoLocomotionEnv(gym.Env):
         self.stance_residual = worst
         return d.qpos.copy(), float(d.xipos[self.pelvis_id][2])
 
+    def set_pelvis_height(self, height: float) -> None:
+        """Place the pelvis COM at an absolute height, exactly.
+
+        `pelvis_ty` is a slide along z, so `pelvis_height = qpos[pelvis_ty] + c`
+        where c depends on the rest of the pose -- including `pelvis_tilt`,
+        which swings the pelvis COM about the root. So c is measured against
+        the pose as it stands now rather than cached from the stance, which
+        put the reference frames 0.1 m too high.
+        """
+        mujoco.mj_forward(self.model, self.data)
+        offset = self.pelvis_height - self.data.qpos[self.qadr["pelvis_ty"]]
+        self.data.qpos[self.qadr["pelvis_ty"]] = float(height) - offset
+        mujoco.mj_forward(self.model, self.data)
+
+    def apply_reference_pose(self, phase: float) -> None:
+        """Pose the model at a phase of the reference gait."""
+        joints, height = self.reference.pose_at(phase)
+        for adr, value in zip(self._tracked_qadr, joints):
+            self.data.qpos[adr] = float(value)
+        self.set_pelvis_height(height)
+
+    def reference_error(self) -> float:
+        """RMS deviation of the tracked joints from the reference, in radians."""
+        if self.reference is None:
+            return 0.0
+        target, _ = self.reference.pose_at(self.ref_phase)
+        actual = self.data.qpos[self._tracked_qadr]
+        return float(np.sqrt(np.mean((actual - target) ** 2)))
+
     def _seat_feet(self, iterations: int = 60) -> None:
         """Put both heels and both toes back on the floor after randomisation.
 
@@ -647,20 +686,41 @@ class MyoLocomotionEnv(gym.Env):
         self.data.qpos[:] = self._neutral_qpos
         self.data.qvel[:] = 0.0
 
-        for name in INDEPENDENT_JOINTS:
-            self.data.qpos[self.qadr[name]] += self.rng.normal(
-                0.0, spec.reset_position_std
+        if spec.rsi and self.reference is not None:
+            # Reference-state initialisation: start at a random phase of the
+            # gait. The pose is the reference's, so the feet are *not* seated
+            # -- forcing them flat would corrupt a mid-swing frame.
+            self.ref_phase = float(self.rng.uniform())
+            self.apply_reference_pose(self.ref_phase)
+            for name in INDEPENDENT_JOINTS:
+                self.data.qpos[self.qadr[name]] += self.rng.normal(
+                    0.0, spec.reset_position_std
+                )
+                self.data.qvel[self.dadr[name]] += self.rng.normal(
+                    0.0, spec.reset_velocity_std
+                )
+            mujoco.mj_forward(self.model, self.data)
+            # Never start underground.
+            lowest = min(
+                min(self._heel_z(foot), self._toe_z(foot)) for foot in FOOT_BODIES
             )
-            self.data.qvel[self.dadr[name]] += self.rng.normal(
-                0.0, spec.reset_velocity_std
+            if lowest < 0.0:
+                self.data.qpos[self.qadr["pelvis_ty"]] -= lowest
+        else:
+            self.ref_phase = 0.0
+            for name in INDEPENDENT_JOINTS:
+                self.data.qpos[self.qadr[name]] += self.rng.normal(
+                    0.0, spec.reset_position_std
+                )
+                self.data.qvel[self.dadr[name]] += self.rng.normal(
+                    0.0, spec.reset_velocity_std
+                )
+            mujoco.mj_forward(self.model, self.data)
+            self._seat_feet()
+            lowest = min(
+                min(self._heel_z(foot), self._toe_z(foot)) for foot in FOOT_BODIES
             )
-
-        mujoco.mj_forward(self.model, self.data)
-        self._seat_feet()
-        lowest = min(
-            min(self._heel_z(foot), self._toe_z(foot)) for foot in FOOT_BODIES
-        )
-        self.data.qpos[self.qadr["pelvis_ty"]] -= lowest
+            self.data.qpos[self.qadr["pelvis_ty"]] -= lowest
 
         if spec.initial_forward_velocity > 0.0:
             speed = max(
@@ -684,6 +744,7 @@ class MyoLocomotionEnv(gym.Env):
         self.total_reward = 0.0
         self.term_values = {}
         self.reward_breakdown = {}
+        self.tracking_error = self.reference_error()
         for key in self.rwd_dict:
             self.rwd_dict[key] = 0.0
         return self._get_obs(), {"curriculum_stage": self.curriculum_stage}
@@ -708,6 +769,9 @@ class MyoLocomotionEnv(gym.Env):
             mujoco.mj_step(self.model, self.data)
 
         self.steps += 1
+        if self.reference is not None:
+            self.ref_phase = self.reference.advance(self.ref_phase, self.dt)
+            self.tracking_error = self.reference_error()
         reward = self._get_reward()
         terminated = self._is_fallen()
         truncated = self.steps >= self.stage_spec.episode_steps
@@ -729,10 +793,25 @@ class MyoLocomotionEnv(gym.Env):
         return gaussian(self.trunk_tilt(), self.stage_spec.terms.upright_sigma)
 
     def _term_velocity(self) -> float:
-        return gaussian(
-            self.forward_velocity() - self.stage_spec.target_vel,
-            self.stage_spec.terms.velocity_sigma,
-        )
+        """Forward speed.
+
+        Tracking stages use a smoothstep that ramps from 0 to the asked-for
+        speed and saturates: "reward for moving faster than 0.1 m/s" as a hard
+        threshold has no gradient at all from a standing start, which is the
+        trap v4's stage D fell into. Non-tracking stages keep the Gaussian
+        around a target speed.
+        """
+        v = self.forward_velocity()
+        if self.stage_spec.track_reference:
+            return smoothstep(v, 0.0, self.stage_spec.terms.velocity_gate)
+        return gaussian(v - self.stage_spec.target_vel,
+                        self.stage_spec.terms.velocity_sigma)
+
+    def _term_tracking(self) -> float:
+        """How closely the tracked joints follow the reference frame."""
+        if self.reference is None:
+            return 1.0
+        return gaussian(self.tracking_error, self.stage_spec.terms.tracking_sigma)
 
     def _term_effort(self) -> float:
         """Reward low mean activation, but only above the target budget.
@@ -752,6 +831,7 @@ class MyoLocomotionEnv(gym.Env):
         "upright": _term_upright,
         "velocity": _term_velocity,
         "effort": _term_effort,
+        "tracking": _term_tracking,
     }
 
     def compute_terms(self) -> Dict[str, float]:
@@ -777,10 +857,21 @@ class MyoLocomotionEnv(gym.Env):
 
     def _is_fallen(self) -> bool:
         spec = self.stage_spec
-        return bool(
+        if (
             self.pelvis_height < spec.min_pelvis_height
             or self.trunk_tilt() > spec.max_trunk_tilt
-        )
+        ):
+            return True
+        # Early termination on tracking error matters as much as the reward
+        # itself: without it the policy banks alive and velocity return from
+        # states that have nothing to do with the reference any more.
+        if (
+            self.reference is not None
+            and spec.max_tracking_error is not None
+            and self.tracking_error > spec.max_tracking_error
+        ):
+            return True
+        return False
 
     # -- rendering ---------------------------------------------------------
 
@@ -813,7 +904,7 @@ class MyoLocomotionEnv(gym.Env):
     def describe(self) -> str:
         return (
             "%s | %s | planar, %d muscles, %d dof (%d root + %d joints), "
-            "%.1f kg | 2 balls/foot | obs %d, act %d | dt %.3f s"
+            "%.1f kg | 2 balls/foot | obs %d, act %d | dt %.3f s%s"
             % (
                 self.curriculum_stage,
                 self.model_path.name,
@@ -825,5 +916,6 @@ class MyoLocomotionEnv(gym.Env):
                 self.observation_space.shape[0],
                 self.n_act,
                 self.dt,
+                "" if self.reference is None else "\n  reference: " + self.reference.describe(),
             )
         )
