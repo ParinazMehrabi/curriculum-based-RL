@@ -30,3 +30,8 @@ v4/notebooks/results/
 
 # MuJoCo writes this next to wherever it is run from
 MUJOCO_LOG.TXT
+
+# Project-local CPython 3.12 for v5. Copied out of uv's managed store so the
+# .venv-myo interpreter does not depend on a roaming AppData path -- see
+# v5/README.md. ~90 MB, regenerate rather than commit.
+.python312/
