@@ -190,8 +190,11 @@ def main(argv=None) -> int:
     rendering = not args.no_render
 
     max_step = env.stage_spec.reward.alive + env.stage_spec.reward.shaping_scale
-    max_terminal = env.stage_spec.forward_bonus * env.stage_spec.episode_steps
-    max_episode = max_step * env.stage_spec.episode_steps + max_terminal
+    # Forward progress is open-ended, so there is no maximum episode return.
+    # `full_forward` is what covering the reference distance pays; a percentage
+    # against it can exceed 100, which is the point of an uncapped term.
+    full_forward = env.stage_spec.forward_bonus * env.stage_spec.episode_steps
+    ref_episode = max_step * env.stage_spec.episode_steps + full_forward
 
     best = None
     for ep in range(args.episodes):
@@ -214,7 +217,7 @@ def main(argv=None) -> int:
                 # what it is worth so far -- otherwise the biggest term in the
                 # reward is invisible until the last line.
                 "forward": env.forward_bonus(), "travel": env.travel,
-                "velocity": env.forward_velocity(),
+                "velocity": env.forward_velocity(), "fly": env.rwd_dict["fly"],
                 "qpos": env.data.qpos.copy() if rendering else None,
             })
             reset_flag = torch.zeros(1)
@@ -227,9 +230,10 @@ def main(argv=None) -> int:
 
     caps = contributions(env, {})
     print("best of %d episodes (seed %d): return %.2f of %.0f, %d steps"
-          % (args.episodes, best["seed"], best["return"], max_episode, best["length"]))
+          % (args.episodes, best["seed"], best["return"], ref_episode, best["length"]))
     print("max:  per step " + "  ".join("%s %.2f" % (n, c) for n, _, c in caps)
-          + " = %.2f   |   at the end  forward %.0f" % (max_step, max_terminal))
+          + " = %.2f   |   at the end  forward %.0f per %.2f m (no ceiling)"
+          % (max_step, full_forward, env.stage_spec.forward_reference_distance))
     print("-" * 112)
     for row in best["record"]:
         if row["step"] % args.every and row is not best["record"][-1]:
@@ -239,15 +243,16 @@ def main(argv=None) -> int:
             for name, value, cap in contributions(env, row["terms"])
         )
         shown = row["reward"] - row["terminal"]
-        print("step %4d: reward %+.4f (%5.1f%%): %s | forward %7.2f (%5.1f%%)  "
-              "travel %+.3f m  v %+.3f m/s"
-              % (row["step"], shown, pct(shown, max_step), parts,
-                 row["forward"], pct(row["forward"], max_terminal),
+        print("step %4d: reward %+.4f (%5.1f%%): %s  fly %+.3f | forward %8.2f "
+              "(%5.1f%%)  travel %+.3f m  v %+.3f m/s"
+              % (row["step"], shown, pct(shown, max_step), parts, row["fly"],
+                 row["forward"], pct(row["forward"], full_forward),
                  row["travel"], row["velocity"]))
     print("-" * 112)
-    print("return %.2f = %.2f per-step + %.2f forward  (%.1f%% of %.0f)"
+    print("return %.2f = %.2f per-step + %.2f forward  (%.1f%% of %.0f for the "
+          "reference distance)"
           % (best["return"], best["return"] - best["terminal"], best["terminal"],
-             pct(best["return"], max_episode), max_episode))
+             pct(best["return"], ref_episode), ref_episode))
 
     if rendering:
         if args.render is not None:

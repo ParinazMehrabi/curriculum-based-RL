@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import pytest
 
@@ -587,27 +588,46 @@ def track_env():
 
 
 def test_reference_loads_and_maps_onto_this_model(track_env):
+    """Hip and knee, both sides, over one phase-averaged cycle."""
     ref = track_env.reference
     assert ref is not None
-    assert ref.n_frames == 195
-    assert len(TRACKED_JOINTS) == 8
-    assert ref.joints.shape == (195, 8)
+    assert TRACKED_JOINTS == (
+        "hip_flexion_r", "knee_angle_r", "hip_flexion_l", "knee_angle_l",
+    )
+    assert ref.n_frames == 100
+    assert ref.joints.shape == (100, 4)
+    assert ref.duration == pytest.approx(2.7596, abs=1e-3)
+    assert ref.condition == "transparent_WALKING"
 
 
-def test_pelvis_tilt_is_sign_flipped_from_the_hfd():
-    """Measured, not assumed.
+def test_the_reference_holds_no_pelvis_height(track_env):
+    """The record has no height channel, and `pose_at` says so with None.
 
-    The .hfd uses OpenSim's convention where negative pelvis_tilt is a forward
-    lean; this model's pelvis_tilt hinge is positive-forward. Getting this
-    backwards would invert the trunk posture the tracking term asks for.
+    Silently returning a number here -- the previous .sto reference's absolute
+    pelvis height -- would place the model vertically from data that does not
+    exist.
     """
-    from myo_curriculum.reference import JOINT_MAP
+    joints, height = track_env.reference.pose_at(0.3)
+    assert height is None
+    assert joints.shape == (len(TRACKED_JOINTS),)
 
-    assert JOINT_MAP["pelvis_tilt"] == ("pelvis_tilt", -1.0)
-    for ref_dof, (_, sign) in JOINT_MAP.items():
-        if ref_dof != "pelvis_tilt":
-            assert sign == +1.0, ref_dof
 
+def test_the_reference_is_in_this_model_s_joint_ranges(track_env):
+    """Knee flexion is positive here and negative in the source log."""
+    model = track_env.model
+    for i in range(100):
+        joints, _ = track_env.reference.pose_at(i / 100.0)
+        for name, value in zip(TRACKED_JOINTS, joints):
+            jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            lo, hi = model.jnt_range[jid]
+            assert lo <= value <= hi, (name, value, lo, hi)
+        knees = [v for n, v in zip(TRACKED_JOINTS, joints) if n.startswith("knee")]
+        assert all(v > 0.0 for v in knees), "knee flexion is positive in MyoSuite"
+
+
+def test_positive_pelvis_tilt_leans_forward():
+    """The trunk convention, kept as a measurement even though the reference
+    no longer prescribes pelvis tilt: the upright term still reads it."""
     env = MyoLocomotionEnv(stage="A", seed=0)
     try:
         def trunk_x(value):
@@ -621,11 +641,26 @@ def test_pelvis_tilt_is_sign_flipped_from_the_hfd():
         env.close()
 
 
-def test_rsi_places_the_pelvis_at_the_reference_height(track_env):
-    for seed in range(8):
+def test_rsi_stands_the_posed_frame_on_the_floor(track_env):
+    """The reference gives no height, so reset has to find one.
+
+    Keeping the standing pelvis height instead leaves a flexed-knee frame
+    hanging: measured, the centre of mass reached 1.258 m against 1.012 m
+    standing, over the 1.10 m that counts as flying. Seating the lowest contact
+    point puts every frame on the ground at its own height.
+    """
+    heights = []
+    for seed in range(12):
         track_env.reset(seed=seed)
-        target = track_env.reference.pose_at(track_env.ref_phase)[1]
-        assert track_env.pelvis_height == pytest.approx(target, abs=1e-9)
+        lowest = min(
+            min(track_env._heel_z(foot), track_env._toe_z(foot))
+            for foot in ("calcn_r", "calcn_l")
+        )
+        assert lowest == pytest.approx(0.0, abs=1e-9), "the lowest point touches"
+        assert track_env.com_height < track_env.stage_spec.fly_threshold
+        heights.append(track_env.pelvis_height)
+    # the phase changes the height, so this is not the standing pose repeated
+    assert max(heights) - min(heights) > 1e-3
 
 
 def test_rsi_starts_on_the_reference_pose(track_env):
@@ -728,25 +763,45 @@ def test_falling_collects_almost_none_of_the_forward_bonus(track_env):
     assert track_env.terminal_bonus < 0.02 * cap
 
 
-def test_forward_bonus_scales_with_distance(track_env):
-    """Zero at a standstill, saturating at the target distance.
+def test_forward_bonus_is_linear_and_open_ended(track_env):
+    """Zero at a standstill, linear in distance, with no ceiling.
 
+    The reference distance is a scale, not a cap: covering twice it pays twice
+    as much, and there is no distance at which walking further stops paying.
     Survival is held at a full episode so this isolates the distance factor;
     `test_forward_bonus_is_monotone_in_survival` covers the other one.
     """
     stage = track_env.stage_spec
-    cap = stage.forward_bonus * stage.episode_steps
+    full = stage.forward_bonus * stage.episode_steps
     track_env.reset(seed=0)
     base = track_env._start_tx
     track_env.steps = stage.episode_steps
-    seen = []
-    for d in (0.0, 0.25, 0.5, 1.0, 2.0):
+
+    seen = {}
+    for d in (0.0, 0.25, 0.5, 1.0, 2.0, 5.0):
         track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base + d
-        seen.append(track_env.forward_bonus())
-    assert seen[0] == pytest.approx(0.0)
-    assert all(b >= a for a, b in zip(seen, seen[1:]))
-    assert seen[3] == pytest.approx(cap)
-    assert seen[4] == pytest.approx(cap), "saturates past the target"
+        seen[d] = track_env.forward_bonus()
+
+    assert seen[0.0] == pytest.approx(0.0)
+    scale = stage.forward_reference_distance
+    for d, value in seen.items():
+        assert value == pytest.approx(full * d / scale), d
+    assert seen[2.0] == pytest.approx(2 * seen[1.0]), "twice as far pays twice"
+    assert seen[5.0] > seen[2.0] > seen[1.0], "further is always worth more"
+
+
+def test_walking_backwards_costs_what_walking_forwards_earns(track_env):
+    """The forward term is signed, so retreating is not merely unrewarded."""
+    stage = track_env.stage_spec
+    track_env.reset(seed=0)
+    base = track_env._start_tx
+    track_env.steps = stage.episode_steps
+
+    track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base + 0.4
+    forwards = track_env.forward_bonus()
+    track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base - 0.4
+    backwards = track_env.forward_bonus()
+    assert backwards == pytest.approx(-forwards)
 
 
 def test_travel_is_the_root_not_the_com(track_env):
@@ -823,12 +878,10 @@ def test_forward_bonus_requires_surviving_not_just_travelling(track_env):
     exactly as well as a walk. Multiplying by the fraction of the episode
     survived makes survival a multiplier rather than a bonus.
     """
-    from myo_curriculum.rewards import smoothstep
-
     stage = track_env.stage_spec
     assert stage.forward_requires_survival
-    cap = stage.forward_bonus * stage.episode_steps
-    distance_only = cap * smoothstep(0.572, 0.0, stage.forward_target_distance)
+    full = stage.forward_bonus * stage.episode_steps
+    distance_only = full * 0.572 / stage.forward_reference_distance
 
     track_env.reset(seed=0)
     base = track_env._start_tx
@@ -841,6 +894,84 @@ def test_forward_bonus_requires_surviving_not_just_travelling(track_env):
     assert dive < 0.1 * distance_only, "a dive should not collect the distance"
     assert survived == pytest.approx(distance_only)
     assert survived > 10 * dive
+
+
+def test_flying_is_penalised_above_the_threshold(track_env):
+    """The only cap on an open-ended distance reward is on height.
+
+    Leaving the ground is otherwise the cheapest way to cover ground, so
+    centre-of-mass height above `fly_threshold` costs per step, per metre.
+    """
+    stage = track_env.stage_spec
+    assert stage.fly_penalty > 0.0
+    track_env.reset(seed=0)
+
+    assert track_env.com_height < stage.fly_threshold, "standing is not flying"
+    assert track_env.fly_penalty() == 0.0
+
+    # lift the whole model by raising the pelvis slide
+    adr = track_env.qadr["pelvis_ty"]
+    ground = track_env.data.qpos[adr]
+    seen = []
+    for lift in (0.0, 0.05, 0.10, 0.30):
+        track_env.data.qpos[adr] = ground + lift
+        mujoco.mj_forward(track_env.model, track_env.data)
+        seen.append(track_env.fly_penalty())
+
+    assert seen[0] == 0.0, "the standing pose is below the threshold"
+    assert all(b >= a for a, b in zip(seen, seen[1:]))
+    assert seen[-1] > 0.0, "a model 30 cm in the air is flying"
+    # charged per metre of excess: the penalty is linear in how high it is
+    excess = track_env.com_height - stage.fly_threshold
+    assert seen[-1] == pytest.approx(stage.fly_penalty * excess)
+
+
+def test_flying_costs_more_than_a_step_is_worth(track_env):
+    """Otherwise height can be held profitably and the cap does not bind."""
+    stage = track_env.stage_spec
+    per_step = stage.reward.alive + stage.reward.shaping_scale
+    # 10 cm above the threshold, which is the scale of a hop
+    assert stage.fly_penalty * 0.10 > per_step
+
+
+def test_the_reference_gait_never_trips_the_fly_penalty(track_env):
+    """No frame of the gait, standing on the floor, counts as flying.
+
+    Seated the way reset seats it: `apply_reference_pose` sets hip and knee
+    only, and the record carries no height, so the pose has to be put on the
+    ground before its centre-of-mass height means anything. Measured across the
+    cycle, seated: 0.974 m at the highest, against a 1.10 m threshold.
+    """
+    highest = 0.0
+    for i in range(100):
+        track_env.apply_reference_pose(i / 100.0)
+        track_env.seat_lowest_contact()
+        highest = max(highest, track_env.com_height)
+        assert track_env.fly_penalty() == 0.0, i
+    assert highest < track_env.stage_spec.fly_threshold
+    assert highest == pytest.approx(0.974, abs=0.01)
+
+
+def test_fly_penalty_is_subtracted_from_the_step_reward(track_env):
+    """It reaches the reward itself, and is reported under its own name."""
+    track_env.reset(seed=0)
+    grounded = track_env._get_reward()
+    assert track_env.rwd_dict["fly"] == 0.0
+    assert track_env.fly_cost == 0.0
+
+    adr = track_env.qadr["pelvis_ty"]
+    track_env.data.qpos[adr] += 0.40
+    mujoco.mj_forward(track_env.model, track_env.data)
+    airborne = track_env._get_reward()
+
+    assert track_env.fly_cost > 0.0
+    assert track_env.rwd_dict["fly"] == pytest.approx(-track_env.fly_cost)
+    # the same pose without the penalty would score the composed terms alone
+    assert airborne == pytest.approx(
+        track_env.stage_spec.reward.compose(track_env.term_values)[0]
+        - track_env.fly_cost
+    )
+    assert airborne < grounded
 
 
 def test_forward_bonus_is_monotone_in_survival(track_env):

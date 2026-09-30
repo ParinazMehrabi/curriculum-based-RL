@@ -236,8 +236,11 @@ class MyoLocomotionEnv(gym.Env):
         self.total_reward = 0.0
         self.term_values: Dict[str, float] = {}
         self.reward_breakdown: Dict[str, float] = {}
+        self.fly_cost = 0.0
+        self.fly_total = 0.0
         self.rwd_dict: Dict[str, float] = {
-            k: 0.0 for k in tuple(self.stage_spec.reward.weights) + ("alive", "total")
+            k: 0.0
+            for k in tuple(self.stage_spec.reward.weights) + ("alive", "fly", "total")
         }
 
         self.stage_spec.reward.warn_if_unsafe(gamma=0.99, label=self.curriculum_stage)
@@ -422,27 +425,58 @@ class MyoLocomotionEnv(gym.Env):
     def forward_bonus(self) -> float:
         """The terminal forward-progress payment for the episode so far.
 
+        Linear in distance and **open-ended**: there is no distance at which
+        this stops paying, so further is always worth more. Covering twice
+        `forward_reference_distance` pays twice as much. It is signed, so
+        travelling backwards costs what travelling forwards earns.
+
         Distance **times** survival. Distance alone is not enough: a trained
         policy learns to dive -- accelerate hard, bank the distance, fall. One
         measured at iteration 180 reached 1.67 m/s, eleven times the
         reference's speed, covered 0.57 m in 0.74 s and collected 425 of 700,
         which was 98.7% of its return. Scaling by the fraction of the episode
-        survived drops that same dive to about 31.
+        survived drops that same dive to about 31, and does not cap distance --
+        a policy that covers more ground while staying up always scores more.
 
         Gating strictly on truncation -- pay only if the full episode is
         survived -- also kills the dive, but pays nothing at all until the
         policy can already last 1000 steps, which removes 70% of the reward
         exactly when it is needed. The product keeps a gradient for partial
         progress while making survival a multiplier rather than a bonus.
+
+        The cap that an unbounded distance reward does need is on height, not
+        distance, because leaving the ground is the cheapest way to cover it.
+        That is `fly_penalty`, charged per step in `_get_reward`.
         """
         spec = self.stage_spec
         if spec.forward_bonus <= 0.0:
             return 0.0
-        progress = smoothstep(self.travel, 0.0, spec.forward_target_distance)
+        scale = spec.forward_reference_distance
+        progress = self.travel / scale if scale > 0.0 else 0.0
         survived = 1.0
         if spec.forward_requires_survival:
             survived = min(1.0, self.steps / max(1, spec.episode_steps))
         return spec.forward_bonus * spec.episode_steps * progress * survived
+
+    @property
+    def com_height(self) -> float:
+        """Whole-body centre-of-mass height, metres. 1.012 m standing."""
+        return float(self.data.subtree_com[0][2])
+
+    def fly_penalty(self) -> float:
+        """Per-step cost of being airborne, as a positive number.
+
+        Charged against centre-of-mass height rather than foot contact: a
+        contact test is satisfiable by keeping one toe down while the body is
+        lifted, and it fires spuriously during the flight phase of any fast
+        gait. Height is what "flying" actually means, and this model's COM
+        never exceeds 1.032 m across the reference gait cycle.
+        """
+        spec = self.stage_spec
+        if spec.fly_penalty <= 0.0:
+            return 0.0
+        excess = self.com_height - spec.fly_threshold
+        return spec.fly_penalty * excess if excess > 0.0 else 0.0
 
     def contact_loads(self) -> np.ndarray:
         """Vertical load on [heel_r, toe_r, heel_l, toe_l], as a fraction of BW.
@@ -599,12 +633,37 @@ class MyoLocomotionEnv(gym.Env):
         self.data.qpos[self.qadr["pelvis_ty"]] = float(height) - offset
         mujoco.mj_forward(self.model, self.data)
 
+    def seat_lowest_contact(self) -> float:
+        """Slide the model vertically until its lowest contact ball touches.
+
+        Returns how far it moved. Whichever foot is lowest is the one that
+        lands, so a mid-swing reference frame keeps its swing foot in the air
+        instead of being forced plantigrade.
+        """
+        mujoco.mj_forward(self.model, self.data)
+        lowest = min(
+            min(self._heel_z(foot), self._toe_z(foot)) for foot in FOOT_BODIES
+        )
+        self.data.qpos[self.qadr["pelvis_ty"]] -= lowest
+        mujoco.mj_forward(self.model, self.data)
+        return float(lowest)
+
     def apply_reference_pose(self, phase: float) -> None:
-        """Pose the model at a phase of the reference gait."""
+        """Pose the tracked joints at a phase of the reference gait.
+
+        Only the tracked joints move. The reference is hip and knee, and it
+        carries no pelvis height, so the pelvis keeps whatever height the
+        solved standing stance gave it and the feet stay seated on the floor.
+        A reference that does prescribe a height returns one, and it is
+        applied.
+        """
         joints, height = self.reference.pose_at(phase)
         for adr, value in zip(self._tracked_qadr, joints):
             self.data.qpos[adr] = float(value)
-        self.set_pelvis_height(height)
+        if height is not None:
+            self.set_pelvis_height(height)
+        else:
+            mujoco.mj_forward(self.model, self.data)
 
     def reference_error(self) -> float:
         """RMS deviation of the tracked joints from the reference, in radians."""
@@ -731,13 +790,13 @@ class MyoLocomotionEnv(gym.Env):
                 self.data.qvel[self.dadr[name]] += self.rng.normal(
                     0.0, spec.reset_velocity_std
                 )
-            mujoco.mj_forward(self.model, self.data)
-            # Never start underground.
-            lowest = min(
-                min(self._heel_z(foot), self._toe_z(foot)) for foot in FOOT_BODIES
-            )
-            if lowest < 0.0:
-                self.data.qpos[self.qadr["pelvis_ty"]] -= lowest
+            # Stand the posed frame on the floor. This has to lower as well
+            # as raise: the reference prescribes hip and knee but no pelvis
+            # height, so a flexed-knee frame hangs above the floor if the
+            # pelvis keeps its standing height -- measured, the centre of mass
+            # reached 1.258 m against 1.012 m standing, high enough to read as
+            # flying.
+            self.seat_lowest_contact()
         else:
             self.ref_phase = 0.0
             for name in INDEPENDENT_JOINTS:
@@ -749,10 +808,7 @@ class MyoLocomotionEnv(gym.Env):
                 )
             mujoco.mj_forward(self.model, self.data)
             self._seat_feet()
-            lowest = min(
-                min(self._heel_z(foot), self._toe_z(foot)) for foot in FOOT_BODIES
-            )
-            self.data.qpos[self.qadr["pelvis_ty"]] -= lowest
+            self.seat_lowest_contact()
 
         if spec.initial_forward_velocity > 0.0:
             speed = max(
@@ -779,6 +835,8 @@ class MyoLocomotionEnv(gym.Env):
         self.tracking_error = self.reference_error()
         self._start_tx = float(self.data.qpos[self.qadr["pelvis_tx"]])
         self.terminal_bonus = 0.0
+        self.fly_cost = 0.0
+        self.fly_total = 0.0
         for key in self.rwd_dict:
             self.rwd_dict[key] = 0.0
         return self._get_obs(), {"curriculum_stage": self.curriculum_stage}
@@ -807,6 +865,7 @@ class MyoLocomotionEnv(gym.Env):
             self.ref_phase = self.reference.advance(self.ref_phase, self.dt)
             self.tracking_error = self.reference_error()
         reward = self._get_reward()
+        self.fly_total += self.fly_cost
         terminated = self._is_fallen()
         truncated = self.steps >= self.stage_spec.episode_steps
         if terminated:
@@ -891,7 +950,12 @@ class MyoLocomotionEnv(gym.Env):
         self.reward_breakdown = breakdown
         for key in self.rwd_dict:
             self.rwd_dict[key] = float(breakdown.get(key, 0.0))
-        return float(total)
+        # Subtracted after composition, not folded in as a [0, 1] term: a
+        # geometric stage would let a term of zero gate the whole reward to
+        # zero, and this is a penalty with no upper bound, not a score.
+        self.fly_cost = self.fly_penalty()
+        self.rwd_dict["fly"] = -self.fly_cost
+        return float(total) - self.fly_cost
 
     def _is_fallen(self) -> bool:
         spec = self.stage_spec

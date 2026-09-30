@@ -1,129 +1,140 @@
-"""The reference gait, mapped onto this model.
+"""The reference gait: hip and knee only, from the ExoGait benchmark record.
 
-Loads `models/reference/gaitTracking_solution_raw.sto` -- an OpenSim Moco
-tracking solution, 301 frames over 6.4 s at a mean forward speed of
-0.142 m/s -- through v4's `.sto` loader, and maps its dofs onto the planar
-MyoSuite model.
+Loads `models/reference/exogait_hip_knee.csv`, which
+`scripts/extract_gait_reference.py` builds from `data/AB68_ExoGait-Benchmark.csv`
+-- 30215 rows of level walking at 2.76 s a cycle, phase-averaged into 100
+frames. That script documents how each of the log's four unnamed dofs was
+identified and why the knee sign is flipped; this module only maps the result
+onto the model.
 
-Two things about that mapping are not identities.
+**Four tracked dofs, not nine.** Hip and knee, both sides. The record has no
+pelvis, lumbar or ankle channel, so the tracking term scores hip and knee and
+nothing else, and the remaining joints are the policy's to choose. Two
+consequences worth stating rather than discovering:
 
-**pelvis_tilt is sign-flipped.** The `.hfd` uses OpenSim's convention where
-negative pelvis_tilt is a forward lean; this model's `pelvis_tilt` hinge is
-positive-forward. Measured, not assumed: setting `pelvis_tilt = +0.30` here
-puts the trunk axis at `x = +0.233`, and `-0.30` at `-0.357`. Everything else
-agrees -- `lumbar_extension` -> `flex_extension`, hip and knee flexion all
-share sign, which is why this reference fits the MyoSuite joint ranges when it
-did not fit the `.hfd`'s (see the v4 README, section 11).
+* **The pelvis height is not prescribed.** The earlier `.sto` reference carried
+  an absolute pelvis height, so posing the model at a phase also placed it
+  vertically. Here `pose_at` returns no height and `apply_reference_pose`
+  leaves the pelvis where the solved standing stance put it, which keeps the
+  feet seated on the floor at reset.
+* **The tracking error is an RMS over four dofs, not nine**, so the same
+  numeric value is a larger per-joint deviation than it used to be.
+  `StageSpec.max_tracking_error` is the same 1.50, which on four dofs is a
+  backstop rather than a limit that binds.
 
-**pelvis_ty is a height, not a joint value.** In the `.hfd` it is the absolute
-pelvis height. Here `pelvis_ty` is a slide offset from the root body's base
-position, so the reference height is applied by solving for the offset that
-produces it. The slide is a pure translation along z, so one `mj_forward` is
-enough to get it exactly.
+**The angles need no unit conversion and one sign flip.** The log is in
+radians. Hip flexion is positive in both conventions; the log's knee is
+negative throughout (-1.94 .. 0 rad) against MyoSuite's positive-is-flexion
+[0, 2.0944], so the extractor negates it and the values in the CSV are already
+in this model's convention.
 
-The record is not perfectly cyclic -- it is tracked from real data, so cycles
-differ. The best wrap point is frame 195 (4.16 s), where the pose differs from
-frame 0 by 0.30 rad summed over nine dofs. Tracking dips briefly at the seam;
-`loop_end` moves it.
+The cycle wraps at frame 99 with a 0.115 rad discontinuity summed over the four
+dofs -- cleaner than the 0.30 rad seam of the `.sto` record it replaces,
+because phase-averaging a hundred cycles removes the stride-to-stride variation
+that made a single tracked cycle non-cyclic.
 """
 from __future__ import annotations
 
-import importlib.util
-import sys
+import csv
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_REFERENCE = REPO_ROOT / "models" / "reference" / "gaitTracking_solution_raw.sto"
-V4_TRAJECTORY = REPO_ROOT / "v4" / "sconegym_crutch_v4" / "trajectory.py"
+DEFAULT_REFERENCE = REPO_ROOT / "models" / "reference" / "exogait_hip_knee.csv"
 
-# reference dof -> (model joint, sign). See the module docstring for why
-# pelvis_tilt is negated and why pelvis_ty is handled apart from these.
-JOINT_MAP: Dict[str, Tuple[str, float]] = {
-    "pelvis_tilt": ("pelvis_tilt", -1.0),
-    "lumbar_extension": ("flex_extension", +1.0),
-    "hip_flexion_r": ("hip_flexion_r", +1.0),
-    "knee_angle_r": ("knee_angle_r", +1.0),
-    "ankle_angle_r": ("ankle_angle_r", +1.0),
-    "hip_flexion_l": ("hip_flexion_l", +1.0),
-    "knee_angle_l": ("knee_angle_l", +1.0),
-    "ankle_angle_l": ("ankle_angle_l", +1.0),
+# The joints the tracking term scores, in the order the reference file holds
+# them. Hip and knee only; see the module docstring.
+TRACKED_JOINTS: Tuple[str, ...] = (
+    "hip_flexion_r",
+    "knee_angle_r",
+    "hip_flexion_l",
+    "knee_angle_l",
+)
+
+# Kept for the record: what each tracked joint is called in the source log, and
+# the sign the extractor applies. Nothing reads this at runtime.
+SOURCE_COLUMNS: Dict[str, Tuple[str, float]] = {
+    "hip_flexion_r": ("JointPositions_3", +1.0),
+    "knee_angle_r": ("JointPositions_4", -1.0),
+    "hip_flexion_l": ("JointPositions_1", +1.0),
+    "knee_angle_l": ("JointPositions_2", -1.0),
 }
-HEIGHT_DOF = "pelvis_ty"
 
-# The joints the tracking term scores, in a fixed order.
-TRACKED_JOINTS: Tuple[str, ...] = tuple(v[0] for v in JOINT_MAP.values())
-
-_MODULE_NAME = "_v5_trajectory_from_v4"
-
-
-def _load_v4_loader():
-    """v4's .sto reader, imported by path for the reasons rewards.py explains."""
-    if _MODULE_NAME in sys.modules:
-        return sys.modules[_MODULE_NAME]
-    if not V4_TRAJECTORY.is_file():
-        raise FileNotFoundError(
-            "v5 reuses v4's .sto loader, but it is not at %s" % V4_TRAJECTORY
-        )
-    spec = importlib.util.spec_from_file_location(_MODULE_NAME, V4_TRAJECTORY)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[_MODULE_NAME] = module
-    spec.loader.exec_module(module)
-    return module
+DEFAULT_DURATION = 2.7596      # seconds per gait cycle, measured
 
 
 class Reference:
     """The reference gait, resampled by phase in [0, 1)."""
 
-    def __init__(self, path=None, loop_end: int = 195):
+    def __init__(self, path=None, duration: Optional[float] = None):
         path = Path(path) if path else DEFAULT_REFERENCE
         if not path.is_file():
-            raise FileNotFoundError("reference trajectory not found: %s" % path)
-        loader = _load_v4_loader()
-
-        dof_names = list(JOINT_MAP) + [HEIGHT_DOF]
-        traj = loader.load_sto(path, dof_names, require_all=True)
-        q = np.asarray(traj.q, dtype=np.float64)
-        time = np.asarray(traj.time, dtype=np.float64)
-
-        if not 1 < loop_end <= traj.n_frames:
-            raise ValueError(
-                "loop_end must lie in (1, %d], got %d" % (traj.n_frames, loop_end)
+            raise FileNotFoundError(
+                "reference gait not found: %s -- run "
+                "scripts/extract_gait_reference.py" % path
             )
-        self.path = path
-        self.source = getattr(traj, "source", path.name)
-        self.n_frames = int(loop_end)
 
-        index = {n: i for i, n in enumerate(dof_names)}
-        # Sign-corrected joint targets, in TRACKED_JOINTS order.
-        self.joints = np.stack(
-            [
-                sign * q[:loop_end, index[ref]]
-                for ref, (_, sign) in JOINT_MAP.items()
-            ],
-            axis=1,
+        header, rows = self._read(path)
+        self.path = path
+        self.source = header.get("source", path.name)
+        self.condition = header.get("condition", "")
+        self.joints = rows
+        self.n_frames = len(rows)
+        if self.n_frames < 2:
+            raise ValueError("%s holds %d frames" % (path, self.n_frames))
+
+        # The cycle duration is a property of the record, so it travels in the
+        # file's header; the argument is for tests and for deliberately
+        # retiming the gait.
+        self.duration = float(
+            duration if duration is not None
+            else header.get("duration_s", DEFAULT_DURATION)
         )
-        self.height = q[:loop_end, index[HEIGHT_DOF]].copy()
-        self.time = time[:loop_end] - time[0]
-        self.duration = float(self.time[-1] - self.time[0]) + float(
-            self.time[1] - self.time[0]
-        )
+        if self.duration <= 0.0:
+            raise ValueError("duration must be positive, got %r" % self.duration)
+
         self.seam = float(np.linalg.norm(self.joints[-1] - self.joints[0]))
+
+    @staticmethod
+    def _read(path: Path) -> Tuple[Dict[str, object], np.ndarray]:
+        """The `# key=value` header and the frames, in TRACKED_JOINTS order."""
+        header: Dict[str, object] = {}
+        with path.open(newline="", encoding="utf-8") as fh:
+            lines = []
+            for line in fh:
+                if line.startswith("#"):
+                    for field in line[1:].split():
+                        key, _, value = field.partition("=")
+                        try:
+                            header[key] = float(value)
+                        except ValueError:
+                            header[key] = value
+                    continue
+                lines.append(line)
+            reader = csv.DictReader(lines)
+            missing = [j for j in TRACKED_JOINTS if j not in (reader.fieldnames or [])]
+            if missing:
+                raise KeyError("%s lacks columns %s" % (path, missing))
+            rows = [[float(rec[j]) for j in TRACKED_JOINTS] for rec in reader]
+        return header, np.asarray(rows, dtype=np.float64)
 
     # -- sampling ---------------------------------------------------------
 
-    def pose_at(self, phase: float) -> Tuple[np.ndarray, float]:
-        """Joint targets and pelvis height at a phase in [0, 1), interpolated."""
+    def pose_at(self, phase: float) -> Tuple[np.ndarray, None]:
+        """Joint targets at a phase in [0, 1), linearly interpolated.
+
+        The second element is the pelvis height, and it is always None: this
+        record has no height channel. Callers keep the two-value shape so the
+        distinction stays explicit at every call site.
+        """
         p = float(phase) % 1.0
         x = p * self.n_frames
         i = int(np.floor(x)) % self.n_frames
         j = (i + 1) % self.n_frames
         f = x - np.floor(x)
-        joints = (1.0 - f) * self.joints[i] + f * self.joints[j]
-        height = (1.0 - f) * self.height[i] + f * self.height[j]
-        return joints, float(height)
+        return (1.0 - f) * self.joints[i] + f * self.joints[j], None
 
     def advance(self, phase: float, dt: float) -> float:
         """Move the phase on by `dt` seconds of wall time, wrapping."""
@@ -131,7 +142,7 @@ class Reference:
 
     def describe(self) -> str:
         return (
-            "%s | %d frames, %.2f s loop, seam %.3f rad | %d tracked joints"
+            "%s | %d frames, %.2f s cycle, seam %.3f rad | %d tracked joints: %s"
             % (self.path.name, self.n_frames, self.duration, self.seam,
-               len(TRACKED_JOINTS))
+               len(TRACKED_JOINTS), ", ".join(TRACKED_JOINTS))
         )

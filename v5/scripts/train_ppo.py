@@ -326,6 +326,11 @@ def parse_args(argv=None):
                    help="RMS joint deviation that ends an episode (stage default 1.5)")
     p.add_argument("--forward-bonus", type=float, default=None,
                    help="per-step-equivalent weight of the terminal forward payment")
+    p.add_argument("--fly-penalty", type=float, default=None,
+                   help="cost per metre of COM height above --fly-threshold, "
+                        "per step; the only cap on the open-ended forward term")
+    p.add_argument("--fly-threshold", type=float, default=None,
+                   help="COM height counted as flying, metres (walking: 1.032)")
     p.add_argument("--fall-penalty", type=float, default=None)
     # bookkeeping
     p.add_argument("--seed", type=int, default=0)
@@ -354,6 +359,10 @@ def main(argv=None) -> int:
         overrides["forward_bonus"] = args.forward_bonus
     if args.fall_penalty is not None:
         overrides["fall_penalty"] = args.fall_penalty
+    if args.fly_penalty is not None:
+        overrides["fly_penalty"] = args.fly_penalty
+    if args.fly_threshold is not None:
+        overrides["fly_threshold"] = args.fly_threshold
     envs = SyncVecEnv(args.stage, args.num_envs, args.seed, **overrides)
     net = PhaseGatedActorCritic(
         envs.obs_dim, envs.act_dim, gait_state_dim(envs.layout), n_phases=args.phases

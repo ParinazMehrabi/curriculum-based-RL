@@ -90,26 +90,52 @@ class StageSpec:
     # upright, rather than the thing that ends most episodes.
     max_tracking_error: float = 1.50
 
-    # Forward progress, paid once when the episode ends rather than per step.
+    # Forward progress, paid once when the episode ends rather than per step,
+    # and **open-ended**: further is always worth more, with no distance at
+    # which the term stops paying.
     #
     # Per step, "reward for moving faster than 0.1 m/s" is collectable by
-    # falling forward: toppling produces v > 0.1 m/s and the term saturates
-    # immediately. Paid at the end against *distance covered*, it is not --
-    # falling ends the episode after a few centimetres, and smoothstep of that
-    # against a metre is essentially zero.
+    # falling forward: toppling produces v > 0.1 m/s and saturates the term
+    # immediately. Paid at the end against *distance covered*, it is not.
     #
-    # `forward_bonus` is a per-step-equivalent weight, so the terminal payment
-    # is `forward_bonus * episode_steps * smoothstep(travel, 0, target)`. That
-    # keeps the asked-for proportions over a full episode: alive 0.1, tracking
-    # 0.2 and forward 0.7 of a maximum 1.0 per step.
+    # `forward_bonus` is a per-step-equivalent weight, so the payment is
+    #
+    #     forward_bonus * episode_steps * travel / forward_reference_distance
+    #
+    # linear in distance and unbounded above. Over an episode covering
+    # `forward_reference_distance` that is alive 0.1, tracking 0.2 and forward
+    # 0.7 of a maximum 1.0 per step -- the asked-for proportions -- and
+    # covering twice the distance pays twice as much.
+    #
+    # It is signed, so walking backwards costs what walking forwards earns.
+    # An open-ended distance reward has to be capped in *height* instead, or
+    # the cheapest way to cover ground is to leave it: see fly_penalty.
     forward_bonus: float = 0.0
-    # Distance for full credit, metres. Defaults to velocity_gate * duration,
-    # i.e. the distance covered by holding the target speed for the episode.
-    forward_target_distance: float = 1.0
+    # The distance worth one full episode of `forward_bonus`, metres. A scale,
+    # not a ceiling: 1.0 m is velocity_gate held for the whole episode, so
+    # matching the asked-for 0.1 m/s pays the full 0.70/step-equivalent and
+    # beating it pays proportionally more.
+    forward_reference_distance: float = 1.0
     # Multiply the bonus by the fraction of the episode survived, so distance
     # only pays if it is held. Without it the policy dives: accelerate, bank
     # the distance, fall. See MyoLocomotionEnv.forward_bonus.
     forward_requires_survival: bool = True
+
+    # Flying. With an open-ended distance reward the cheapest way to cover
+    # ground is to stop touching it -- launch, travel ballistically, land. A
+    # penalty on centre-of-mass height makes that unprofitable, and it is the
+    # only cap on the forward term.
+    #
+    # Measured on this model: the centre of mass sits at 1.012 m standing and
+    # spans 0.935 .. 1.032 m across the reference gait cycle. 1.10 m leaves
+    # ~7 cm of headroom above anything walking does, so the penalty is silent
+    # during normal gait and bites only once the model leaves the ground.
+    #
+    # Charged per step, per metre of excess: 10 cm too high costs 1.0 a step
+    # against a maximum per-step reward of 0.30, so height cannot be held
+    # profitably for long.
+    fly_threshold: float = 1.10      # COM height, metres
+    fly_penalty: float = 10.0        # per metre of excess, per step
 
     # Stance width needs no parameter any more: hip adduction is pinned to
     # zero by the planar constraint, so the feet sit at the model's own hip
@@ -251,8 +277,11 @@ STAGE_B = StageSpec(
 #                                   penalty; see below
 #   0.1  for surviving 10 s      -> 0.10/step alive bonus over 1000 steps
 #   0.7  for moving forward      -> paid ONCE at the end, against distance
-#                                   covered: 0.70 * 1000 * smoothstep(travel,
-#                                   0, 1.0 m)
+#                                   covered, open-ended: 0.70 * 1000 * travel
+#                                   / 1.0 m. 2 m pays 1400, 3 m pays 2100;
+#                                   there is no distance at which it stops
+#                                   paying. Height is capped instead, by
+#                                   fly_penalty.
 #   0.2  for following the gait  -> reference tracking, weight 0.20/step
 #
 # Composed **additively**, not by v4's geometric mean. Geometrically, a
@@ -261,14 +290,14 @@ STAGE_B = StageSpec(
 # the priority: standing still scores 0.10, moving scores 0.80, moving on the
 # reference scores 1.00.
 #
-# Over a full episode the maxima are alive 100, tracking 200 and forward 700,
-# summing to 1000 -- the same proportions as a 1.0/step reward, with the
-# forward share moved to the end.
+# Over a full episode alive is at most 100 and tracking at most 200; forward is
+# 700 for the reference distance of 1 m and has no maximum at all, so a policy
+# that walks further always scores higher.
 #
 # Paying forward progress terminally is what stops it being farmed by falling.
 # Per step, any topple produces v > 0.1 m/s and saturates the term; against
-# distance at the end, a fall at step 32 has covered ~0.05 m, and
-# smoothstep(0.05, 0, 1.0) is 0.007.
+# distance at the end, a fall at step 32 has covered ~0.05 m, worth 35 before
+# the survival factor scales it to 1.1.
 #
 # fall_penalty stays small on purpose. With early termination, falling already
 # forfeits the rest of the episode -- up to ~900 steps at ~1.0 -- and that is
@@ -284,7 +313,7 @@ STAGE_W = StageSpec(
     initial_forward_velocity=0.10,
     initial_forward_velocity_std=0.03,
     forward_bonus=0.70,
-    forward_target_distance=1.00,   # 0.10 m/s held for the full 10 s
+    forward_reference_distance=1.00,  # 0.10 m/s for 10 s = one full payment
     reward=RewardSpec(
         alive=0.10,
         shaping_scale=0.20,

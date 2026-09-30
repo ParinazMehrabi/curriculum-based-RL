@@ -77,13 +77,14 @@ def main(argv=None) -> int:
               "(smoothstep of travel against %.2f m)"
               % (env.stage_spec.forward_bonus, env.stage_spec.episode_steps,
                  env.stage_spec.forward_bonus * env.stage_spec.episode_steps,
-                 env.stage_spec.forward_target_distance))
+                 env.stage_spec.forward_reference_distance))
     print("=" * 100)
 
     obs, _ = env.reset(seed=args.seed)
     rng = np.random.default_rng(args.seed)
     spec = env.stage_spec
     max_step = spec.reward.alive + spec.reward.shaping_scale
+    # Open-ended: this is what the reference distance pays, not a ceiling.
     max_terminal = spec.forward_bonus * spec.episode_steps
     max_episode = max_step * spec.episode_steps + max_terminal
     total = 0.0
@@ -131,7 +132,7 @@ def main(argv=None) -> int:
             if max_terminal > 0:
                 print("forward progress paid at the end: travel %+.4f m of %.2f m "
                       "-> %.2f (%.1f%% of %.0f)"
-                      % (env.travel, env.stage_spec.forward_target_distance,
+                      % (env.travel, env.stage_spec.forward_reference_distance,
                          env.terminal_bonus, pct(env.terminal_bonus, max_terminal),
                          max_terminal))
             break

@@ -40,3 +40,8 @@ MUJOCO_LOG.TXT
 # Never delete this directory to keep it out of a commit -- ignore it.
 v5/runs/
 v5/render/
+
+# The raw ExoGait benchmark log: 220 MB, and only
+# v5/scripts/extract_gait_reference.py reads it. Its 4.6 KB output,
+# models/reference/exogait_hip_knee.csv, is committed instead.
+v5/data/
