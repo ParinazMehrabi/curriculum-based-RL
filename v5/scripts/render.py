@@ -43,6 +43,7 @@ def still(env, width, height):
     renderer = mujoco.Renderer(env.model, height=height, width=width)
     options = mujoco.MjvOption()
     options.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
+    options.geomgroup[4] = 1   # MyoSuite's collision group, where the balls live
     cam = make_camera(env)
     frames, labels = [], []
     # The model faces ~109 degrees, so offset the azimuths from that to get

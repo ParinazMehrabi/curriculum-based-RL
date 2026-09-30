@@ -298,7 +298,9 @@ class MyoLocomotionEnv(gym.Env):
             ball.density = 0.0
             ball.contype = 1
             ball.conaffinity = 1
-            ball.group = 3
+            # Group 4 is where MyoSuite keeps its collision geometry, so the
+            # balls are hidden by default and shown by the same toggle.
+            ball.group = 4
             ball.rgba = [0.9, 0.5, 0.2, 0.7]
         return spec.compile()
 
