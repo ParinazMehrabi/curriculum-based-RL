@@ -230,6 +230,8 @@ class MyoLocomotionEnv(gym.Env):
         self._viewer = None
 
         self.rng = np.random.default_rng(seed)
+        self._start_tx = 0.0
+        self.terminal_bonus = 0.0
         self.steps = 0
         self.total_reward = 0.0
         self.term_values: Dict[str, float] = {}
@@ -411,6 +413,25 @@ class MyoLocomotionEnv(gym.Env):
     def forward_velocity(self) -> float:
         """Forward COM speed. In a planar model this is simply +x."""
         return float(self.com_velocity()[0])
+
+    @property
+    def travel(self) -> float:
+        """Forward distance covered since reset, metres."""
+        return float(self.data.qpos[self.qadr["pelvis_tx"]] - self._start_tx)
+
+    def forward_bonus(self) -> float:
+        """The terminal forward-progress payment for the episode so far.
+
+        Zero unless the stage pays one. Scaled by `episode_steps` so it keeps
+        its share of a full episode's return, and driven by *distance* rather
+        than speed so that falling -- which ends the episode early -- cannot
+        collect it.
+        """
+        spec = self.stage_spec
+        if spec.forward_bonus <= 0.0:
+            return 0.0
+        progress = smoothstep(self.travel, 0.0, spec.forward_target_distance)
+        return spec.forward_bonus * spec.episode_steps * progress
 
     def contact_loads(self) -> np.ndarray:
         """Vertical load on [heel_r, toe_r, heel_l, toe_l], as a fraction of BW.
@@ -745,6 +766,8 @@ class MyoLocomotionEnv(gym.Env):
         self.term_values = {}
         self.reward_breakdown = {}
         self.tracking_error = self.reference_error()
+        self._start_tx = float(self.data.qpos[self.qadr["pelvis_tx"]])
+        self.terminal_bonus = 0.0
         for key in self.rwd_dict:
             self.rwd_dict[key] = 0.0
         return self._get_obs(), {"curriculum_stage": self.curriculum_stage}
@@ -777,6 +800,10 @@ class MyoLocomotionEnv(gym.Env):
         truncated = self.steps >= self.stage_spec.episode_steps
         if terminated:
             reward -= self.stage_spec.reward.fall_penalty
+        if terminated or truncated:
+            # Forward progress is paid once, here, against distance covered.
+            self.terminal_bonus = self.forward_bonus()
+            reward += self.terminal_bonus
         self.total_reward += reward
 
         info = {"curriculum_stage": self.curriculum_stage}

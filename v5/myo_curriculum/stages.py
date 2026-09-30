@@ -83,6 +83,23 @@ class StageSpec:
     # so the policy never banks return from a desynced state. None disables it.
     max_tracking_error: float = 0.80
 
+    # Forward progress, paid once when the episode ends rather than per step.
+    #
+    # Per step, "reward for moving faster than 0.1 m/s" is collectable by
+    # falling forward: toppling produces v > 0.1 m/s and the term saturates
+    # immediately. Paid at the end against *distance covered*, it is not --
+    # falling ends the episode after a few centimetres, and smoothstep of that
+    # against a metre is essentially zero.
+    #
+    # `forward_bonus` is a per-step-equivalent weight, so the terminal payment
+    # is `forward_bonus * episode_steps * smoothstep(travel, 0, target)`. That
+    # keeps the asked-for proportions over a full episode: alive 0.1, tracking
+    # 0.2 and forward 0.7 of a maximum 1.0 per step.
+    forward_bonus: float = 0.0
+    # Distance for full credit, metres. Defaults to velocity_gate * duration,
+    # i.e. the distance covered by holding the target speed for the episode.
+    forward_target_distance: float = 1.0
+
     # Stance width needs no parameter any more: hip adduction is pinned to
     # zero by the planar constraint, so the feet sit at the model's own hip
     # spacing and the legs cannot cross.
@@ -222,8 +239,10 @@ STAGE_B = StageSpec(
 #   big penalty for falling      -> early termination plus a small explicit
 #                                   penalty; see below
 #   0.1  for surviving 10 s      -> 0.10/step alive bonus over 1000 steps
-#   0.7  for moving > 0.1 m/s    -> smoothstep(v, 0, 0.10), weight 0.70
-#   0.2  for following the gait  -> reference tracking, weight 0.20
+#   0.7  for moving forward      -> paid ONCE at the end, against distance
+#                                   covered: 0.70 * 1000 * smoothstep(travel,
+#                                   0, 1.0 m)
+#   0.2  for following the gait  -> reference tracking, weight 0.20/step
 #
 # Composed **additively**, not by v4's geometric mean. Geometrically, a
 # tracking term near zero early in training would gate the velocity term to
@@ -231,9 +250,14 @@ STAGE_B = StageSpec(
 # the priority: standing still scores 0.10, moving scores 0.80, moving on the
 # reference scores 1.00.
 #
-# alive + shaping_scale = 1.0 and the weights sum to 0.90, so the weighted
-# arithmetic mean puts velocity's maximum contribution at exactly 0.70 and
-# tracking's at 0.20, which is what was asked for.
+# Over a full episode the maxima are alive 100, tracking 200 and forward 700,
+# summing to 1000 -- the same proportions as a 1.0/step reward, with the
+# forward share moved to the end.
+#
+# Paying forward progress terminally is what stops it being farmed by falling.
+# Per step, any topple produces v > 0.1 m/s and saturates the term; against
+# distance at the end, a fall at step 32 has covered ~0.05 m, and
+# smoothstep(0.05, 0, 1.0) is 0.007.
 #
 # fall_penalty stays small on purpose. With early termination, falling already
 # forfeits the rest of the episode -- up to ~900 steps at ~1.0 -- and that is
@@ -248,15 +272,14 @@ STAGE_W = StageSpec(
     rsi=True,
     initial_forward_velocity=0.10,
     initial_forward_velocity_std=0.03,
+    forward_bonus=0.70,
+    forward_target_distance=1.00,   # 0.10 m/s held for the full 10 s
     reward=RewardSpec(
         alive=0.10,
-        shaping_scale=0.90,
+        shaping_scale=0.20,
         composition=ADDITIVE,
         fall_penalty=5.0,
-        weights={
-            "velocity": 0.70,
-            "tracking": 0.20,
-        },
+        weights={"tracking": 1.00},
     ),
 )
 

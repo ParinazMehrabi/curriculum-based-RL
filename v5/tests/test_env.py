@@ -663,25 +663,100 @@ def test_reference_phase_wraps(track_env):
 
 
 def test_stage_w_maxima_are_the_ones_asked_for():
-    """alive 0.10, velocity 0.70, tracking 0.20, summing to exactly 1.00."""
-    spec = STAGES["W"].reward
+    """alive 0.1, tracking 0.2 per step; forward 0.7 paid at the end.
+
+    Over a full episode that is 100 + 200 + 700 = 1000, the same proportions
+    as a 1.0/step reward with the forward share moved to the end.
+    """
+    stage = STAGES["W"]
+    spec = stage.reward
     total_w = sum(spec.active_weights.values())
     caps = {
         name: spec.shaping_scale * w / total_w
         for name, w in spec.active_weights.items()
     }
     assert spec.alive == pytest.approx(0.10)
-    assert caps["velocity"] == pytest.approx(0.70)
     assert caps["tracking"] == pytest.approx(0.20)
-    assert spec.alive + sum(caps.values()) == pytest.approx(1.00)
+    assert spec.alive + sum(caps.values()) == pytest.approx(0.30)
+
+    terminal = stage.forward_bonus * stage.episode_steps
+    assert terminal == pytest.approx(700.0)
+    episode = 0.30 * stage.episode_steps + terminal
+    assert episode == pytest.approx(1000.0)
 
 
 def test_stage_w_is_additive_not_geometric():
-    """Geometric composition would gate velocity to zero on early tracking."""
+    """Geometric composition would gate the alive bonus on early tracking."""
     spec = STAGES["W"].reward
     assert spec.composition == "additive"
-    total, _ = spec.compose({"velocity": 1.0, "tracking": 0.0})
-    assert total > 0.7, "a good walk with no tracking should still score"
+    total, _ = spec.compose({"tracking": 0.0})
+    assert total >= spec.alive, "surviving should score even with no tracking"
+
+
+def test_forward_progress_is_paid_at_the_end_not_per_step(track_env):
+    """Per step it is farmable by falling; terminally it is not."""
+    assert "velocity" not in track_env.stage_spec.reward.weights
+    track_env.reset(seed=1)
+    paid = []
+    for _ in range(1000):
+        _, reward, term, trunc, _ = track_env.step(
+            np.full(track_env.n_act, -0.6, np.float32)
+        )
+        paid.append(track_env.terminal_bonus)
+        if term or trunc:
+            break
+    assert all(p == 0.0 for p in paid[:-1]), "nothing terminal before the end"
+    assert paid[-1] == pytest.approx(track_env.forward_bonus())
+
+
+def test_falling_collects_almost_none_of_the_forward_bonus(track_env):
+    """The whole point of moving it to the end.
+
+    Per step, any topple produces v > 0.1 m/s and saturated the term at 100%.
+    Against distance it cannot: a fall ends the episode after a few
+    centimetres.
+    """
+    track_env.reset(seed=1)
+    for _ in range(1000):
+        _, _, term, trunc, _ = track_env.step(
+            np.full(track_env.n_act, -0.6, np.float32)
+        )
+        if term or trunc:
+            break
+    assert term, "this policy should fall"
+    cap = track_env.stage_spec.forward_bonus * track_env.stage_spec.episode_steps
+    assert track_env.terminal_bonus < 0.02 * cap
+
+
+def test_forward_bonus_scales_with_distance(track_env):
+    """Zero at a standstill, saturating at the target distance."""
+    from myo_curriculum.rewards import smoothstep
+
+    stage = track_env.stage_spec
+    cap = stage.forward_bonus * stage.episode_steps
+    track_env.reset(seed=0)
+    base = track_env._start_tx
+    seen = []
+    for d in (0.0, 0.25, 0.5, 1.0, 2.0):
+        track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base + d
+        seen.append(track_env.forward_bonus())
+    assert seen[0] == pytest.approx(0.0)
+    assert all(b >= a for a, b in zip(seen, seen[1:]))
+    assert seen[3] == pytest.approx(cap)
+    assert seen[4] == pytest.approx(cap), "saturates past the target"
+
+
+def test_travel_is_the_root_not_the_com(track_env):
+    """Root translation cannot be inflated by swinging the limbs forward.
+
+    Measured on a toppling rollout the two disagree in sign: pelvis_tx goes
+    -0.032 m while the whole-body COM goes +0.028 m, because the legs swing
+    forward as the model falls.
+    """
+    track_env.reset(seed=0)
+    base = track_env._start_tx
+    track_env.data.qpos[track_env.qadr["pelvis_tx"]] = base + 0.37
+    assert track_env.travel == pytest.approx(0.37)
 
 
 def test_velocity_term_is_a_smoothstep_that_saturates(track_env):

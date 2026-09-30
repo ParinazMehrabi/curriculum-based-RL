@@ -19,7 +19,7 @@ v5/
     validate_env.py  smoke test: frame, planarity, contact, reward, gradient
     run_reward.py    run an episode, printing the reward term by term
     render.py        multi-view still or rollout figure
-  tests/          55 tests
+  tests/          59 tests
   figures/        rendered PNGs (referenced above)
 ```
 
@@ -301,28 +301,46 @@ Holding the stance is stage A's job, not the reset's.
 
 ## Stage W: the walking reward
 
-| | asked for | implemented |
-|---|---|---|
-| falling | big penalty | early termination + `fall_penalty = 5.0` |
-| surviving 10 s | 0.1 | `alive = 0.10`/step over 1000 steps (10 s at dt 0.01) |
-| moving > 0.1 m/s | 0.7 | `smoothstep(v, 0, 0.10)`, weight 0.70 |
-| following the trajectory | 0.2 | reference tracking, weight 0.20 |
-| | | **max 1.00 per step** |
+| | asked for | implemented | when |
+|---|---|---|---|
+| falling | big penalty | early termination + `fall_penalty = 5.0` | on fall |
+| surviving 10 s | 0.1 | `alive = 0.10`/step over 1000 steps | per step |
+| following the trajectory | 0.2 | reference tracking, weight 0.20 | per step |
+| moving forward | 0.7 | `0.70 × 1000 × smoothstep(travel, 0, 1 m)` | **at the end** |
+
+```
+per step    alive 0.10  +  tracking 0.20                        =    0.30
+at the end  forward 0.70 × 1000 × smoothstep(travel, 0, 1.0 m)  =  ≤ 700
+--------------------------------------------------------------------------
+a perfect 10 s episode                                          =   1000
+```
+
+Same proportions as a flat 1.0/step reward -- alive 100, tracking 200, forward
+700 -- with the forward share moved to the end.
 
 Three departures from the literal spec, each for a reason:
 
-**A hard threshold at 0.1 m/s has no gradient from a standing start.** The
-policy begins at 0 m/s, scores nothing, and never learns to move -- the trap
-v4's stage D fell into. `smoothstep` ramps 0 → 1 over 0 → 0.1 m/s and saturates
-above, so it still rewards "faster than 0.1" but has gradient below it.
+**Forward progress is paid terminally, against distance.** Per step it is
+farmable by *falling*: any topple produces v > 0.1 m/s and the term saturates
+at 100% immediately. Measured at the end against distance covered it is not --
+a fall ends the episode after a few centimetres, and `smoothstep(0.013, 0, 1)`
+is 0.001. On a toppling rollout the old form collected the full 0.70 every
+step; the new one pays **0.35 of 700**.
+
+`travel` is the **root translation** (`pelvis_tx`), not the COM. On that same
+rollout the two disagree in sign -- pelvis_tx goes −0.032 m while the whole-body
+COM goes +0.028 m, because the legs swing forward as the model falls. Root
+translation is the model's actual ground track, it is the reference's own
+progress variable, and it cannot be inflated by throwing limbs forward.
 
 **A bonus paid only at 10 s is too sparse.** 1000 steps is a long way to carry
-credit. It is a `0.10`/step alive bonus instead -- same total, dense signal.
+credit. Survival is a `0.10`/step alive bonus instead -- same total, dense
+signal.
 
 **A big fall penalty freezes the policy.** With early termination, falling
-already forfeits the rest of the episode, up to ~900 steps at ~1.0. That *is*
-the penalty. A large explicit one on top makes standing still beat any policy
-that risks moving. `RewardSpec.termination_report()` checks this.
+already forfeits the rest of the episode. That *is* the penalty. A large
+explicit one on top makes standing still beat any policy that risks moving.
+`RewardSpec.termination_report()` checks this.
 
 ### Additive, not geometric
 
@@ -361,20 +379,17 @@ that has nothing to do with the reference.
 
 ### One thing to know before training
 
-`velocity` saturates immediately. The reference walks at 0.142 m/s and the gate
-is 0.10, so **anything moving forward -- including falling forward -- collects
-the full 0.70**. `validate_env.py --stage W` says so:
+The terminal payment is up to **700** against a per-step reward of at most
+**0.30**. GAE propagates it correctly, but the value function now has to span
+four orders of magnitude, and a single terminal number carries most of the
+episode's return -- which is real variance in the advantage estimate. Normalise
+returns (PPO implementations usually do) and watch the value loss.
 
-```
-    tracking   0.9993  <-- saturated, no gradient
-    velocity   1.0000  <-- saturated, no gradient
-```
-
-That is what was asked for and it is defensible -- the 0.70 is a
-survival-plus-progress bonus, and `tracking` plus early termination is what
-separates walking from toppling. But the *learning signal* lives almost
-entirely in the 0.20 tracking term. If training stalls, raise `velocity_gate`
-toward 0.3 m/s so the term has gradient through the useful range.
+If that variance bites, the dense equivalent is to pay `Δtravel` each step
+instead. It telescopes to the same total over an episode, is policy-invariant
+as potential-based shaping, and cannot be farmed by falling either -- you only
+collect what you actually cover. The only thing it loses is the saturation at
+1 m, which stops a sprint outscoring a walk.
 
 ## Three things that were wrong first, and are now tested
 

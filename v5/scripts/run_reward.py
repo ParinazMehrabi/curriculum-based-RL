@@ -9,13 +9,16 @@ then every term's **contribution** to that total with its own share of the
 maximum it could contribute. The shares are what make the line readable: a
 term at 100% is saturated and is no longer a source of gradient.
 
-For stage W the maxima are the ones the reward was specified with:
+Forward progress is paid once, when the episode ends, against distance
+covered -- so the per-step line shows only what is paid per step, and the
+terminal payment is printed on its own line at the end.
 
-    alive     0.10   (0.10 per step, 1.0 over the full 10 s)
-    velocity  0.70   (smoothstep to 0.1 m/s)
-    tracking  0.20   (reference gait)
-    ----------------
-    total     1.00
+For stage W:
+
+    per step   alive    0.10   +  tracking 0.20            =   0.30
+    at the end forward  0.70 x 1000 steps x smoothstep(travel, 0, 1 m)
+    ---------------------------------------------------------------
+    a perfect 10 s episode                                 = 1000
 """
 from __future__ import annotations
 
@@ -68,12 +71,21 @@ def main(argv=None) -> int:
     print(env.stage_spec.describe())
     caps = contributions(env)
     print("max per step:  " + "   ".join("%s %.2f" % (n, c) for n, _, c in caps)
-          + "   |   total %.2f" % sum(c for _, _, c in caps))
+          + "   =  %.2f" % sum(c for _, _, c in caps))
+    if env.stage_spec.forward_bonus > 0:
+        print("max at end:    forward %.2f x %d steps = %.0f   "
+              "(smoothstep of travel against %.2f m)"
+              % (env.stage_spec.forward_bonus, env.stage_spec.episode_steps,
+                 env.stage_spec.forward_bonus * env.stage_spec.episode_steps,
+                 env.stage_spec.forward_target_distance))
     print("=" * 100)
 
     obs, _ = env.reset(seed=args.seed)
     rng = np.random.default_rng(args.seed)
-    max_step = env.stage_spec.reward.alive + env.stage_spec.reward.shaping_scale
+    spec = env.stage_spec
+    max_step = spec.reward.alive + spec.reward.shaping_scale
+    max_terminal = spec.forward_bonus * spec.episode_steps
+    max_episode = max_step * spec.episode_steps + max_terminal
     total = 0.0
     step = 0
 
@@ -96,10 +108,10 @@ def main(argv=None) -> int:
             extra = ""
             if env.reference is not None:
                 extra = "  | phase %.3f  err %.3f rad" % (env.ref_phase, env.tracking_error)
+            shown = reward - env.terminal_bonus   # the terminal payment prints below
             print(
-                "step %4d: reward %+.4f (%5.1f%% of max): %s  | v %+.3f m/s%s"
-                % (step, reward, pct(reward, max_step), parts,
-                   env.forward_velocity(), extra)
+                "step %4d: reward %+.4f (%5.1f%% of max): %s  | travel %+.3f m%s"
+                % (step, shown, pct(shown, max_step), parts, env.travel, extra)
             )
 
         if terminated or truncated:
@@ -116,13 +128,20 @@ def main(argv=None) -> int:
             print("%s at step %d: %s"
                   % ("TERMINATED" if terminated else "truncated (episode length reached)",
                      step, "; ".join(why) or "-"))
+            if max_terminal > 0:
+                print("forward progress paid at the end: travel %+.4f m of %.2f m "
+                      "-> %.2f (%.1f%% of %.0f)"
+                      % (env.travel, env.stage_spec.forward_target_distance,
+                         env.terminal_bonus, pct(env.terminal_bonus, max_terminal),
+                         max_terminal))
             break
 
     print("-" * 100)
-    print("return %.2f over %d steps | mean %.4f/step (%.1f%% of max) | %.2f s simulated"
-          % (total, step, total / max(step, 1),
-             pct(total / max(step, 1), max_step), step * env.dt))
-    print("a perfect episode would score %.1f" % (max_step * env.stage_spec.episode_steps))
+    per_step = total - env.terminal_bonus
+    print("return %.2f over %d steps (%.2f per-step + %.2f terminal) | %.2f s simulated"
+          % (total, step, per_step, env.terminal_bonus, step * env.dt))
+    print("a perfect episode would score %.0f  ->  this run reached %.1f%%"
+          % (max_episode, pct(total, max_episode)))
     env.close()
     return 0
 
