@@ -24,6 +24,8 @@ The first stage that fails is the answer, and everything above it is fine.
 """
 from __future__ import annotations
 
+import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -86,21 +88,51 @@ STAGES = (
 )
 
 
-def run(code: str):
+def clean_environment() -> dict:
+    """The same environment with PATH cut back to Windows' own directories.
+
+    Windows resolves a DLL by name against PATH among other places, so another
+    program's copy of a library can be loaded into this process in place of the
+    one shipped beside the wheel that wants it. On a machine with SCONE
+    installed that is a live possibility -- it ships its own physics libraries
+    -- and it would look exactly like this: MuJoCo imports, and then its model
+    compiler dies with an access violation on a model that cannot fail.
+    """
+    env = dict(os.environ)
+    root = env.get("SystemRoot", r"C:\Windows")
+    env["PATH"] = os.pathsep.join([
+        os.path.join(root, "system32"),
+        root,
+        os.path.join(root, "System32", "Wbem"),
+        str(Path(sys.executable).parent),
+    ])
+    return env
+
+
+def run(code: str, env=None):
     done = subprocess.run([sys.executable, "-c", code],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=env)
     lines = [ln for ln in (done.stdout + done.stderr).splitlines() if ln.strip()
              and not ln.startswith("MyoSuite")]
     return done.returncode, lines
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--clean-path", action="store_true",
+                    help="run with PATH cut back to Windows' own directories, "
+                         "so no other program's DLLs can be loaded instead")
+    args = ap.parse_args(argv)
+
     print("python  %s" % sys.executable)
-    print("version %s\n" % sys.version.split()[0])
+    print("version %s" % sys.version.split()[0])
+    env = clean_environment() if args.clean_path else None
+    print("PATH    %s\n" % ("stripped to Windows' own directories" if env
+                            else "as inherited"))
 
     first_failure = None
     for name, code in STAGES:
-        rc, lines = run(code)
+        rc, lines = run(code, env)
         if rc == 0:
             print("  ok     %-38s %s" % (name, lines[-1] if lines else ""))
             continue
@@ -118,6 +150,9 @@ def main() -> int:
         return 0
     print("\nfirst failing stage: %s" % first_failure)
     print("Everything listed above it is fine; that stage is where to look.")
+    if not args.clean_path:
+        print("Try --clean-path next: if the same stage then passes, another "
+              "program's DLLs are being loaded from PATH.")
     return 1
 
 
