@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from _myosuite_data import require_model  # noqa: E402
+
 V5 = Path(__file__).resolve().parents[1]
 if str(V5) not in sys.path:
     sys.path.insert(0, str(V5))
@@ -52,7 +54,7 @@ def test_gait_state_dim_stops_before_the_activation_block():
 
 def test_gait_state_dim_tracks_the_env_not_a_constant():
     pytest.importorskip("mujoco")
-    pytest.importorskip("myosuite")
+    require_model()
     from myo_curriculum.env import MyoLocomotionEnv
 
     env = MyoLocomotionEnv(stage="W", seed=0)

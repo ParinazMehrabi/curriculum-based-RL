@@ -130,8 +130,17 @@ def main(argv=None) -> int:
     print("PATH    %s\n" % ("stripped to Windows' own directories" if env
                             else "as inherited"))
 
+    rc, lines = run("import mujoco; print(hasattr(mujoco, 'MjSpec'))", env)
+    has_spec = rc == 0 and lines and lines[-1].strip() == "True"
+
     first_failure = None
     for name, code in STAGES:
+        # MjSpec only exists from MuJoCo 3.2. Its absence is not a failure:
+        # the env falls back to the exported flat model, which the last stage
+        # is what actually tests.
+        if "MjSpec" in name and not has_spec:
+            print("  n/a    %-38s no MjSpec before MuJoCo 3.2" % name)
+            continue
         rc, lines = run(code, env)
         if rc == 0:
             print("  ok     %-38s %s" % (name, lines[-1] if lines else ""))

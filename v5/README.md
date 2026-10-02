@@ -60,44 +60,60 @@ which `eval_checkpoint.py` can write a `.gif` but not the `.mp4` it defaults to.
 
 ### On a pre-2015 CPU
 
-`requirements-haswell.txt` instead, then one script. On an Intel Xeon E5-2650
-v3 (Haswell, 2014) under Windows 10 22H2, torch 2.14.0's `c10.dll` and four of
-MuJoCo's six bundled plugins fail to load with `WinError 1114` -- a library that
-loads and whose own initialisation code then fails -- while the same wheels work
-on a 2025 CPU:
+`requirements-haswell.txt`, plus MyoSuite installed without its
+dependencies:
 
 ```powershell
 uv pip install --python .venv-myo\Scripts\python.exe -r v5\requirements-haswell.txt
-.\run.ps1 scripts\prune_mujoco_plugins.py --apply
+uv pip install --python .venv-myo\Scripts\python.exe --no-deps myosuite==2.12.2
 ```
 
-Everything else on that machine checked out first: all eight MSVC runtime DLLs
-load, numpy and its native libraries load, mandatory ASLR is off, the OS is
-supported, the DLLs are not truncated, and it fails from `C:` as well as from
-`E:`. So it is the CPU baseline the wheels were built against, and reinstalling
-cannot fix it.
+On an Intel Xeon E5-2650 v3 (Haswell, 2014) under Windows 10 22H2, every
+MuJoCo from 3.2 up dies with an access violation compiling even a
+single-sphere model, and so does torch 2.14.0's `c10.dll`.
+`scripts/find_working_mujoco.py` builds one throwaway environment per
+version and compiles in each:
 
-Three pins differ: `torch==2.5.1`, `mujoco==3.3.0` and `myosuite==2.11.6`.
+```
+mujoco 3.6.0   native crash  exit 0xc0000005
+mujoco 3.3.0   native crash  exit 0xc0000005
+mujoco 3.2.7   native crash  exit 0xc0000005
+mujoco 3.1.6   COMPILES
+mujoco 3.0.1   COMPILES
+```
 
-MuJoCo has to be downgraded, and the reason is specific. 3.6 bundles
-`obj_decoder` and `stl_decoder`, and on that CPU *those* are among the plugins
-that will not initialise -- so pruning cannot help, because the MyoSuite meshes
-cannot be read without them. 3.3 decodes meshes in the core and bundles only
-`actuator`, `elasticity`, `sdf` and `sensor`, none of which this project uses,
-so there all four are prunable. Downgrading mujoco forces myosuite down with
-it, since 2.12.2 requires `mujoco>=3.6,<3.7`.
+Everything cheaper was ruled out first, on that machine: all eight MSVC
+runtime DLLs load, numpy and its own native libraries work, mandatory ASLR
+is off, the OS is supported, the DLLs are not truncated, `PATH` holds no
+conflicting MuJoCo, nothing foreign is injected into the process, and the
+same failure happens from `C:` as from `E:` and under both uv's interpreter
+and python.org's. The break is in MuJoCo's own compiled code, between 3.1
+and 3.2.
 
-All three were verified rather than assumed. On mujoco 3.3.0 / myosuite 2.11.6
-/ torch 2.5.1 the compiled model is identical in what matters -- nq 49, nv 49,
-nu 290, the same root qpos addresses, the same 0.907292 m solved standing
-pelvis height -- all 118 tests pass, and `--seed 7` produces iteration logs
-bit-identical to the current stack.
+Two consequences shape the pin set.
 
-`_build_model` was changed to make this possible: it repurposes the free root
-joint as the first planar joint and empties the keyframe, instead of deleting
-either. `spec.delete` does not exist before mujoco 3.6, and no version offers a
-delete method on the element itself, so the previous code only ran on 3.6. One
-code path now covers both.
+**MuJoCo 3.1 has no MjSpec**, which `_build_model` uses to restructure
+MyoFullBody into a planar model. It compiles
+`models/mjcf/myobody_planar.xml` instead -- the same restructuring,
+exported from the same `_planar_spec` by
+`scripts/export_planar_model.py`. Editing MyoSuite's XML directly was the
+alternative and is worse: `myobody.xml` is 30 lines of `<include>`, and
+every joint, geom and body involved lives in one of seven included files,
+so it would mean an include-inliner and a second copy of the edits.
+`--check` compares the two routes across 12 counts and 16 arrays and over
+a 400-step rollout; they agree to 5e-11 in qpos, which is the precision
+MuJoCo writes decimals at.
+
+**MyoSuite has to go in with `--no-deps`**, because every release pins a
+MuJoCo this machine cannot run. Only its data is wanted, so
+`_default_model_path` locates the package with `find_spec` instead of
+importing it -- which also stops several hundred unused Gym environments
+being registered on every start -- and the tests check for the model file
+rather than importing the package.
+
+Verified rather than assumed: all 118 tests pass on this pin set bar one,
+which tests a guard reachable only through MjSpec, and `--seed 7` gives
+iteration logs bit-identical to the current stack.
 
 ### Reproducing a run on another machine
 

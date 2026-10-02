@@ -17,12 +17,14 @@ import mujoco
 import numpy as np
 import pytest
 
+from _myosuite_data import require_model  # noqa: E402
+
 V5 = Path(__file__).resolve().parents[1]
 if str(V5) not in sys.path:
     sys.path.insert(0, str(V5))
 
 mujoco = pytest.importorskip("mujoco")
-pytest.importorskip("myosuite")
+require_model()
 
 from myo_curriculum import rewards as rewards_shim  # noqa: E402
 from myo_curriculum.env import (  # noqa: E402
@@ -555,7 +557,17 @@ def test_reset_is_roughly_supported_by_the_feet(env):
 
 
 def test_a_model_without_a_free_root_is_refused(tmp_path):
-    """The planar rebuild needs a free root to replace."""
+    """The planar rebuild needs a free root to replace.
+
+    Only reachable through MjSpec. Without it the model comes from the
+    exported flat XML, which carries the restructuring already done and never
+    reads the source file's joints, so there is no free root to check for. The
+    guard this tests exists to catch MyoSuite changing its model under the
+    MjSpec edits; the equivalent check for the export is
+    `scripts/export_planar_model.py --check`.
+    """
+    if not hasattr(mujoco, "MjSpec"):
+        pytest.skip("no MjSpec: the model comes from the exported flat XML")
     xml = tmp_path / "no_free_root.xml"
     xml.write_text(
         '<mujoco><worldbody><body name="pelvis">'

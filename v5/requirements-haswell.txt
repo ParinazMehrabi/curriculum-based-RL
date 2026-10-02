@@ -1,53 +1,57 @@
-# v5 on a pre-2015 CPU. Use this instead of requirements.txt there, then run
+# v5 on a pre-2015 CPU. Use this instead of requirements.txt there.
 #
 #   uv pip install --python .venv-myo\Scripts\python.exe -r v5\requirements-haswell.txt
-#   python scripts\prune_mujoco_plugins.py --apply
+#   uv pip install --python .venv-myo\Scripts\python.exe --no-deps myosuite==2.12.2
+#
+# No plugin pruning and no other step: MuJoCo 3.1 bundles no plugins at all.
 #
 # Measured on an Intel Xeon E5-2650 v3 (Haswell, 2014), Windows 10 Enterprise
-# 22H2 build 19045: torch 2.14.0's c10.dll and MuJoCo 3.6's bundled plugins
-# fail to load with
+# 22H2 build 19045, by scripts/find_working_mujoco.py, which builds one
+# throwaway environment per MuJoCo version and compiles a single-sphere model
+# in each:
 #
-#     OSError: [WinError 1114] A dynamic link library (DLL) initialization
-#     routine failed
+#     mujoco 3.6.0   native crash  exit 0xc0000005
+#     mujoco 3.3.0   native crash  exit 0xc0000005
+#     mujoco 3.2.7   native crash  exit 0xc0000005
+#     mujoco 3.1.6   COMPILES
+#     mujoco 3.0.1   COMPILES
 #
-# which Windows reports when a library loads and its own initialisation code
-# then fails. Everything cheaper was ruled out on that machine first: all
-# eight MSVC runtime DLLs load, numpy and its native libraries load, mandatory
-# ASLR is off, the OS is supported, c10.dll is not truncated, and the identical
-# DLL fails from C: as well as from E:. The same wheels work on a 2025 CPU. So
-# these wheels execute an instruction during library initialisation that
-# Haswell does not have, and reinstalling cannot change it.
+# Everything cheaper was ruled out on that machine first: all eight MSVC
+# runtime DLLs load, numpy and its own native libraries work, mandatory ASLR
+# is off, the OS is supported, the DLLs are not truncated, PATH holds no
+# conflicting MuJoCo, nothing foreign is injected into the process, the same
+# failure occurs from C: and E:, and it occurs under both uv's interpreter and
+# python.org's. The break is in MuJoCo's own compiled code, between 3.1 and
+# 3.2. torch 2.14.0 fails there the same way and 2.5.1 does not.
 #
-# Three pins differ from requirements.txt. All three combinations below were
-# run here: 118 tests pass, and `--seed 7` gives iteration logs bit-identical
-# to the current stack (ret -34.91, max -33.56, travel -0.272 m), so a run
-# started on one machine and continued on the other is the same run.
+# All of this was verified, not assumed: on this pin set all 118 tests pass
+# (one skipped, see below), and `--seed 7` gives iteration logs bit-identical
+# to the current stack -- ret -34.91, max -33.56, len 55.5, travel -0.272 m --
+# so a run started on one machine and continued on the other is the same run.
+
+# MuJoCo 3.1 has no MjSpec, which the env uses to restructure MyoFullBody into
+# a planar model. It compiles models/mjcf/myobody_planar.xml instead -- the
+# same restructuring, exported from the same code by
+# scripts/export_planar_model.py, whose --check compares the two routes field
+# by field and under a 400-step rollout. The only test that cannot run here is
+# the one for a guard that exists only on the MjSpec path.
+mujoco==3.1.6
 
 # torch 2.5.1 loads on Haswell; 2.14.0 does not.
 torch==2.5.1
 
-# MuJoCo 3.6 bundles `obj_decoder` and `stl_decoder`, and *those* are among
-# the plugins that will not initialise -- so pruning cannot help, because the
-# MyoSuite meshes cannot be read without them. 3.3 decodes meshes in the core
-# and bundles only `actuator`, `elasticity`, `sdf` and `sensor`, none of which
-# this project uses, so all four can go.
-#
-# Downgrading mujoco means downgrading myosuite with it: myosuite 2.12.2
-# requires mujoco>=3.6,<3.7. 2.11.6 pins 3.3 and ships the same
-# simhive/myo_sim/body/myobody.xml -- verified identical in what matters, the
-# compiled model being nq 49, nv 49, nu 290, the same root qpos addresses and
-# the same 0.907292 m solved standing pelvis height as on 3.6.
-mujoco==3.3.0
-myosuite==2.11.6
+# numpy below 2 because mujoco 3.1.6 predates the numpy 2 ABI.
+numpy==1.26.4
 
-# --- unchanged from requirements.txt ---------------------------------------
+# MyoSuite is NOT listed here, and has to be installed with --no-deps,
+# because every release pins a MuJoCo this machine cannot run (2.12.2 wants
+# >=3.6,<3.7). Only its data is wanted -- one XML and the meshes beside it --
+# and env.py locates the package with `find_spec` rather than importing it, so
+# its own MuJoCo requirement never applies. The tests do the same.
+
+gymnasium==0.29.1
 imageio==2.38.0
 imageio-ffmpeg==0.6.0
 pillow==12.3.0
 pytest==9.1.1
 matplotlib==3.11.2
-numpy==2.5.3
-# gymnasium 0.29.1, not the 1.2.3 of requirements.txt: myosuite 2.11.6 pins
-# it exactly, so this is not a choice. The tests do not touch gymnasium's own
-# API -- MyoLocomotionEnv only borrows its spaces -- and all 118 pass on it.
-gymnasium==0.29.1

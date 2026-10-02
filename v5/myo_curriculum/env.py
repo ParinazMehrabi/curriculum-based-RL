@@ -57,6 +57,9 @@ The reward machinery is v4's, imported rather than copied -- see rewards.py.
 """
 from __future__ import annotations
 
+import importlib.util
+import sys
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -155,15 +158,37 @@ BALL_CONTACTS = {
     "toe_l": ("toes_l", (+0.057671, +0.009030, -0.009809)),
 }
 
+# The restructured model as flat XML, for a MuJoCo too old for MjSpec.
+# Written by scripts/export_planar_model.py; see _compile_exported.
+EXPORTED_MODEL = (
+    Path(__file__).resolve().parents[2] / "models" / "mjcf" / "myobody_planar.xml"
+)
+
 HEEL_GEOMS = {"calcn_r": ("heel_r",), "calcn_l": ("heel_l",)}
 TOE_GEOMS = {"calcn_r": ("toe_r",), "calcn_l": ("toe_l",)}
 
 
 def _default_model_path() -> Path:
-    import myosuite
+    """MyoFullBody's XML, located without importing MyoSuite.
 
+    `find_spec` finds the package without executing it, and that matters twice
+    over. MyoSuite's `__init__` registers several hundred Gym environments,
+    none of which this project uses, and it pins MuJoCo tightly -- 2.12.2 wants
+    >=3.6,<3.7 -- so importing it would make its own MuJoCo compatibility this
+    env's problem. All that is wanted here is the data: one XML file and the
+    meshes beside it, both of which are just files on disk.
+
+    That is what lets a machine whose MuJoCo must be older than any MyoSuite
+    release allows run this at all; see requirements-haswell.txt.
+    """
+    spec = importlib.util.find_spec("myosuite")
+    if spec is None or not spec.origin:
+        raise FileNotFoundError(
+            "myosuite is not installed in %s -- it ships the model file"
+            % sys.executable
+        )
     return (
-        Path(myosuite.__file__).resolve().parent
+        Path(spec.origin).resolve().parent
         / "simhive" / "myo_sim" / "body" / "myobody.xml"
     )
 
@@ -259,9 +284,51 @@ class MyoLocomotionEnv(gym.Env):
     def _build_model(path):
         """Compile a planar, two-ball-contact version of the model.
 
-        Done through MjSpec rather than by editing a copy of MyoSuite's XML,
-        so there is no second model file to keep in step with the package and
-        no mesh paths to rewrite.
+        Through MjSpec where it exists, so there is no second model file to
+        keep in step with the package and no mesh paths to rewrite. MjSpec
+        arrived in MuJoCo 3.2, and on a machine whose MuJoCo must be older
+        than that -- see `requirements-haswell.txt`, where 3.2 and newer crash
+        outright -- this falls back to the exported flat XML that
+        `scripts/export_planar_model.py` writes from this same code.
+        """
+        if hasattr(mujoco, "MjSpec"):
+            return MyoLocomotionEnv._planar_spec(path).compile()
+        return MyoLocomotionEnv._compile_exported(path)
+
+    @staticmethod
+    def _compile_exported(path):
+        """Compile the committed flat XML, for a MuJoCo without MjSpec.
+
+        The export carries `meshdir="../"`, which only resolves from
+        MyoSuite's own `body/` directory. Rather than write into site-packages,
+        the loader points `meshdir` and `texturedir` at the local MyoSuite
+        install by absolute path, so the model can be compiled from anywhere.
+        """
+        if not EXPORTED_MODEL.is_file():
+            raise FileNotFoundError(
+                "this MuJoCo (%s) has no MjSpec, so the model has to come from "
+                "%s, which is missing -- regenerate it on a machine with "
+                "MuJoCo 3.2+ using scripts/export_planar_model.py"
+                % (mujoco.__version__, EXPORTED_MODEL)
+            )
+        assets = Path(path).resolve().parent.parent  # .../simhive/myo_sim
+        xml = EXPORTED_MODEL.read_text(encoding="utf-8")
+        for attr in ("meshdir", "texturedir"):
+            xml = xml.replace(
+                '%s="../"' % attr, '%s="%s/"' % (attr, assets.as_posix()), 1
+            )
+        with tempfile.TemporaryDirectory(prefix="myo-planar-") as tmp:
+            flat = Path(tmp) / "myobody_planar.xml"
+            flat.write_text(xml, encoding="utf-8")
+            return mujoco.MjModel.from_xml_path(str(flat))
+
+    @staticmethod
+    def _planar_spec(path):
+        """The restructured model as an uncompiled MjSpec.
+
+        Separate from `_build_model` so that
+        `scripts/export_planar_model.py` can write it out as flat XML from the
+        same definition, rather than keeping a second copy of these edits.
         """
         spec = mujoco.MjSpec.from_file(str(path))
 
@@ -341,7 +408,7 @@ class MyoLocomotionEnv(gym.Env):
             # density these four added 0.3 kg and shifted the feet's inertia.
             ball.density = 0.0
             ball.rgba = [0.9, 0.5, 0.2, 0.9]
-        return spec.compile()
+        return spec
 
     def _validate_model(self) -> None:
         m = self.model

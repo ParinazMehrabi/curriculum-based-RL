@@ -13,6 +13,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from _myosuite_data import require_model  # noqa: E402
+
 V5 = Path(__file__).resolve().parents[1]
 if str(V5) not in sys.path:
     sys.path.insert(0, str(V5))
@@ -145,7 +147,7 @@ def test_vec_env_returns_the_true_final_observation():
     Bootstrapping truncation from the reset state instead is silent and wrong.
     """
     pytest.importorskip("mujoco")
-    pytest.importorskip("myosuite")
+    require_model()
     envs = SyncVecEnv("W", 2, seed=0)
     try:
         envs.reset(0)

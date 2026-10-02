@@ -39,7 +39,14 @@ def env():
 
 
 def dense_moment(model, data) -> np.ndarray:
-    """`data.actuator_moment` as (nu, nv). It is stored sparse."""
+    """`data.actuator_moment` as (nu, nv), sparse or dense.
+
+    MuJoCo stores it sparse from 3.2 -- `moment_rownnz`, `moment_rowadr` and
+    `moment_colind` -- and dense before that. Both are supported because this
+    project runs on both: a 2014 CPU cannot load any MuJoCo newer than 3.1.
+    """
+    if not hasattr(data, "moment_rownnz"):
+        return np.asarray(data.actuator_moment).reshape(model.nu, model.nv)
     out = np.zeros((model.nu, model.nv))
     flat = np.asarray(data.actuator_moment).ravel()
     for i in range(model.nu):
