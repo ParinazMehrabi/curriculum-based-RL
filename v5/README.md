@@ -44,8 +44,7 @@ uv python install 3.12
 Copy-Item -Recurse "$env:APPDATA\uv\python\cpython-3.12.14-windows-x86_64-none" .python312
 
 .python312\python.exe -m venv .venv-myo
-.venv-myo\Scripts\python.exe -m pip install -r v5
-equirements.txt
+.venv-myo\Scripts\python.exe -m pip install -r v5\requirements.txt
 ```
 
 `v5/requirements.txt` pins the versions this was developed against, so a second
@@ -68,8 +67,8 @@ loads and whose own initialisation code then fails -- while the same wheels work
 on a 2025 CPU:
 
 ```powershell
-uv pip install --python .venv-myo\Scripts\python.exe -r v5equirements-haswell.txt
-.un.ps1 scripts\prune_mujoco_plugins.py --apply
+uv pip install --python .venv-myo\Scripts\python.exe -r v5\requirements-haswell.txt
+.\run.ps1 scripts\prune_mujoco_plugins.py --apply
 ```
 
 Everything else on that machine checked out first: all eight MSVC runtime DLLs
@@ -125,13 +124,9 @@ On PowerShell, `run.ps1` resolves the interpreter by absolute path and clears
 the environment variables that can stop a venv interpreter starting:
 
 ```powershell
-.
-un.ps1 scripts
-un_reward.py --stage W
-.
-un.ps1 scriptsalidate_env.py
-.
-un.ps1 -m pytest tests -q
+.\run.ps1 scripts\run_reward.py --stage W
+.\run.ps1 scripts\validate_env.py
+.\run.ps1 -m pytest tests -q
 ```
 
 Or activate it once and use `python` directly:
