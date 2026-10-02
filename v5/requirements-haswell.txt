@@ -47,4 +47,7 @@ pillow==12.3.0
 pytest==9.1.1
 matplotlib==3.11.2
 numpy==2.5.3
-gymnasium==1.2.3
+# gymnasium 0.29.1, not the 1.2.3 of requirements.txt: myosuite 2.11.6 pins
+# it exactly, so this is not a choice. The tests do not touch gymnasium's own
+# API -- MyoLocomotionEnv only borrows its spaces -- and all 118 pass on it.
+gymnasium==0.29.1
