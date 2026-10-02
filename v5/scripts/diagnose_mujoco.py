@@ -150,6 +150,12 @@ def main(argv=None) -> int:
         return 0
     print("\nfirst failing stage: %s" % first_failure)
     print("Everything listed above it is fine; that stage is where to look.")
+    if first_failure == "import mujoco" and "1114" in " ".join(lines):
+        # Easy to hit by building a fresh venv and forgetting the prune, which
+        # is per-environment: the plugins live in site-packages.
+        print("WinError 1114 at import is the bundled plugins. Run")
+        print("    python scripts/prune_mujoco_plugins.py --apply")
+        print("against THIS interpreter, then try again.")
     if not args.clean_path:
         print("Try --clean-path next: if the same stage then passes, another "
               "program's DLLs are being loaded from PATH.")
