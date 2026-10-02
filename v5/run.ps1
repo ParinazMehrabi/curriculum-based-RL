@@ -35,7 +35,7 @@ Create it with:
     pip install uv
     uv python install 3.12
     uv venv --python 3.12 .venv-myo
-    uv pip install --python .venv-myo/Scripts/python.exe myosuite pytest matplotlib pillow
+    uv pip install --python .venv-myo/Scripts/python.exe -r v5/requirements.txt
 "@
     exit 1
 }

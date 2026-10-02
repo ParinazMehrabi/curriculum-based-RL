@@ -44,8 +44,32 @@ uv python install 3.12
 Copy-Item -Recurse "$env:APPDATA\uv\python\cpython-3.12.14-windows-x86_64-none" .python312
 
 .python312\python.exe -m venv .venv-myo
-.venv-myo\Scripts\python.exe -m pip install myosuite pytest matplotlib pillow
+.venv-myo\Scripts\python.exe -m pip install -r v5equirements.txt
 ```
+
+`v5/requirements.txt` pins the versions this was developed against, so a second
+machine reproduces the same runs; `v5/requirements-lock.txt` is the full freeze
+if the transitive versions matter too. Do not install from the repo root's
+`requirements.txt` -- that one is v4's, and its `gym<0.22` and `numpy<2` pins
+force Python 3.9, which MyoSuite cannot use.
+
+**`torch` is not a MyoSuite dependency**, although everything else here arrives
+with it. `pip install myosuite` alone gives an environment where
+`scripts/train_ppo.py` fails at import. Neither is `imageio-ffmpeg`, without
+which `eval_checkpoint.py` can write a `.gif` but not the `.mp4` it defaults to.
+
+### Reproducing a run on another machine
+
+Nothing else is needed. The model file ships inside the `myosuite` wheel
+(`simhive/myo_sim/body/myobody.xml`, Apache-2.0), so there is no download step
+and no licence to accept -- `myosuite_init` and the non-commercial MyoSkeleton
+are a larger model this project does not use. `v5/data/` is gitignored but only
+`scripts/extract_gait_reference.py` reads it, and its 4.6 KB output is committed.
+
+Training is seeded: `--seed 7` twice on one machine gives bit-identical logs.
+Across machines, with these pins, expect the same trajectory rather than the
+same bits -- torch's CPU kernels are not promised to be identical across
+instruction sets.
 
 **Why the copy.** A venv built straight from uv's managed store is not
 self-contained: `uv venv` leaves a 256 KB launcher in `Scripts/` that resolves

@@ -1,0 +1,43 @@
+# v5: the planar muscle model. Python 3.12.
+#
+# v4's requirements.txt at the repo root does NOT cover v5 and cannot: it pins
+# gym<0.22 and numpy<2 for sconegym, which forces Python 3.9, and MyoSuite needs
+# 3.10+. The two environments are separate on purpose.
+#
+#   .python312\python.exe -m venv .venv-myo
+#   .venv-myo\Scripts\python.exe -m pip install -r v5\requirements.txt
+#
+# Versions are pinned to the ones this was developed and tested against, so a
+# second machine reproduces the same runs. `requirements-lock.txt` next to this
+# file is the full freeze, transitive dependencies included, for when that
+# matters more than being able to read the list.
+
+# --- the model and the physics ---------------------------------------------
+# MyoSuite ships MyoFullBody as myo_sim/body/myobody.xml inside the wheel,
+# under Apache-2.0. Nothing is downloaded at import and no licence has to be
+# accepted: `myosuite_init` and the non-commercial MyoSkeleton are a different,
+# larger model that this project does not use.
+myosuite==2.12.2
+mujoco==3.6.0
+
+# --- the policy and the trainer --------------------------------------------
+# NOT a MyoSuite dependency, despite everything else here arriving with it.
+# scripts/train_ppo.py and myo_curriculum/policy.py both need it, so a venv
+# built from `pip install myosuite` alone fails at import.
+torch==2.14.0
+
+# --- rendering -------------------------------------------------------------
+# imageio arrives with MyoSuite; the ffmpeg plugin does not, and without it
+# eval_checkpoint.py can write a .gif but not the .mp4 it defaults to.
+imageio==2.38.0
+imageio-ffmpeg==0.6.0
+pillow==12.3.0
+
+# --- tests and plots -------------------------------------------------------
+pytest==9.1.1
+matplotlib==3.11.2
+
+# Arrives with MyoSuite, pinned because the whole project is written against
+# the numpy 2 API here while v4 is pinned below 2.0.
+numpy==2.5.3
+gymnasium==1.2.3
