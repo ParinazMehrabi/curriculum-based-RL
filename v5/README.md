@@ -44,7 +44,8 @@ uv python install 3.12
 Copy-Item -Recurse "$env:APPDATA\uv\python\cpython-3.12.14-windows-x86_64-none" .python312
 
 .python312\python.exe -m venv .venv-myo
-.venv-myo\Scripts\python.exe -m pip install -r v5equirements.txt
+.venv-myo\Scripts\python.exe -m pip install -r v5
+equirements.txt
 ```
 
 `v5/requirements.txt` pins the versions this was developed against, so a second
@@ -57,6 +58,32 @@ force Python 3.9, which MyoSuite cannot use.
 with it. `pip install myosuite` alone gives an environment where
 `scripts/train_ppo.py` fails at import. Neither is `imageio-ffmpeg`, without
 which `eval_checkpoint.py` can write a `.gif` but not the `.mp4` it defaults to.
+
+### On a pre-2015 CPU
+
+`requirements-haswell.txt` instead, then one script. On an Intel Xeon E5-2650
+v3 (Haswell, 2014) under Windows 10 22H2, torch 2.14.0's `c10.dll` and four of
+MuJoCo's six bundled plugins fail to load with `WinError 1114` -- a library that
+loads and whose own initialisation code then fails -- while the same wheels work
+on a 2025 CPU:
+
+```powershell
+uv pip install --python .venv-myo\Scripts\python.exe -r v5equirements-haswell.txt
+.un.ps1 scripts\prune_mujoco_plugins.py --apply
+```
+
+Everything else on that machine checked out first: all eight MSVC runtime DLLs
+load, numpy and its native libraries load, mandatory ASLR is off, the OS is
+supported, the DLLs are not truncated, and it fails from `C:` as well as from
+`E:`. So it is the CPU baseline the wheels were built against, and reinstalling
+cannot fix it.
+
+`torch==2.5.1` is the pin. It is not merely importable there: all 118 tests pass
+on it, and `--seed 7` gives iteration logs bit-identical to 2.14.0. MuJoCo is
+*not* downgraded -- 3.2.7's plugins fail on that CPU too, so the version is not
+the problem. Only `obj_decoder` and `stl_decoder` are needed, to read the
+MyoSuite meshes; `elasticity`, `sdf_plugin`, `actuator` and `sensor` are not,
+and the script moves them to `plugin_disabled/` rather than deleting them.
 
 ### Reproducing a run on another machine
 
