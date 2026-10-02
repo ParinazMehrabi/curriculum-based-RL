@@ -1,41 +1,46 @@
-# v5 on a pre-2015 CPU. Use this instead of requirements.txt there.
+# v5 on a pre-2015 CPU. Use this instead of requirements.txt there, then run
 #
 #   uv pip install --python .venv-myo\Scripts\python.exe -r v5\requirements-haswell.txt
 #   python scripts\prune_mujoco_plugins.py --apply
 #
 # Measured on an Intel Xeon E5-2650 v3 (Haswell, 2014), Windows 10 Enterprise
-# 22H2 build 19045: torch 2.14.0's c10.dll and four of MuJoCo's six bundled
-# plugins fail to load with
+# 22H2 build 19045: torch 2.14.0's c10.dll and MuJoCo 3.6's bundled plugins
+# fail to load with
 #
 #     OSError: [WinError 1114] A dynamic link library (DLL) initialization
 #     routine failed
 #
 # which Windows reports when a library loads and its own initialisation code
-# then fails. Everything else on that machine checks out -- all eight MSVC
-# runtime DLLs load, numpy and its native libraries load, mandatory ASLR is
-# off, the OS is supported, the DLLs are not truncated, and the same failure
-# happens from C: as from E:. The same wheels work on a 2025 CPU. So the
-# wheels execute an instruction during library initialisation that Haswell
-# does not have, and no amount of reinstalling changes that.
+# then fails. Everything cheaper was ruled out on that machine first: all
+# eight MSVC runtime DLLs load, numpy and its native libraries load, mandatory
+# ASLR is off, the OS is supported, c10.dll is not truncated, and the identical
+# DLL fails from C: as well as from E:. The same wheels work on a 2025 CPU. So
+# these wheels execute an instruction during library initialisation that
+# Haswell does not have, and reinstalling cannot change it.
 #
-# Only two pins differ from requirements.txt.
+# Three pins differ from requirements.txt. All three combinations below were
+# run here: 118 tests pass, and `--seed 7` gives iteration logs bit-identical
+# to the current stack (ret -34.91, max -33.56, travel -0.272 m), so a run
+# started on one machine and continued on the other is the same run.
 
-# torch 2.5.1 loads on Haswell; 2.14.0 does not. Verified to be more than just
-# importable: all 118 tests pass on it, and `--seed 7` produces iteration logs
-# bit-identical to 2.14.0, so a run started here and continued there is the
-# same run.
+# torch 2.5.1 loads on Haswell; 2.14.0 does not.
 torch==2.5.1
 
-# mujoco is NOT downgraded. 3.2.7's plugins fail on that CPU too, so the
-# version is not the problem -- the plugins are, and only two of the six are
-# needed. scripts/prune_mujoco_plugins.py moves the other four aside; run it
-# after installing. Downgrading would also risk the MjSpec API, which
-# myo_curriculum/env.py uses to restructure the model and which moved between
-# 3.2 and 3.6.
-mujoco==3.6.0
+# MuJoCo 3.6 bundles `obj_decoder` and `stl_decoder`, and *those* are among
+# the plugins that will not initialise -- so pruning cannot help, because the
+# MyoSuite meshes cannot be read without them. 3.3 decodes meshes in the core
+# and bundles only `actuator`, `elasticity`, `sdf` and `sensor`, none of which
+# this project uses, so all four can go.
+#
+# Downgrading mujoco means downgrading myosuite with it: myosuite 2.12.2
+# requires mujoco>=3.6,<3.7. 2.11.6 pins 3.3 and ships the same
+# simhive/myo_sim/body/myobody.xml -- verified identical in what matters, the
+# compiled model being nq 49, nv 49, nu 290, the same root qpos addresses and
+# the same 0.907292 m solved standing pelvis height as on 3.6.
+mujoco==3.3.0
+myosuite==2.11.6
 
 # --- unchanged from requirements.txt ---------------------------------------
-myosuite==2.12.2
 imageio==2.38.0
 imageio-ffmpeg==0.6.0
 pillow==12.3.0

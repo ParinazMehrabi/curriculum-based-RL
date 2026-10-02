@@ -272,13 +272,28 @@ class MyoLocomotionEnv(gym.Env):
                 % (Path(path).name, str(root.type))
             )
         root_body = root.parent
-        spec.delete(root)
-        # The keyframe's qpos was sized for the free root and no longer fits.
-        for key in list(spec.keys):
-            spec.delete(key)
-        for name, jtype, axis in ROOT_SPEC:
+
+        # The free joint is **repurposed** as the first planar joint rather
+        # than deleted, and the keyframe is emptied rather than removed,
+        # because neither deletion exists in every MjSpec this has to run on:
+        # `spec.delete` arrived after mujoco 3.3, and no version offers a
+        # delete method on the element itself. Repurposing and clearing work
+        # on 3.3 and 3.6 alike, so there is one code path instead of two.
+        #
+        # Order still comes out as ROOT_SPEC lists it: the free joint is the
+        # root body's first, and added joints append after it.
+        name, jtype, axis = ROOT_SPEC[0]
+        root.name, root.type, root.axis = name, jtype, list(axis)
+        for name, jtype, axis in ROOT_SPEC[1:]:
             joint = root_body.add_joint()
             joint.name, joint.type, joint.axis = name, jtype, list(axis)
+
+        # The keyframe's qpos was sized for the free root and no longer fits.
+        for key in spec.keys:
+            key.qpos = []
+            key.qvel = []
+            key.act = []
+            key.ctrl = []
 
         present = {j.name for j in spec.joints}
         missing = [n for n in OUT_OF_PLANE_JOINTS if n not in present]

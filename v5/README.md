@@ -77,12 +77,27 @@ supported, the DLLs are not truncated, and it fails from `C:` as well as from
 `E:`. So it is the CPU baseline the wheels were built against, and reinstalling
 cannot fix it.
 
-`torch==2.5.1` is the pin. It is not merely importable there: all 118 tests pass
-on it, and `--seed 7` gives iteration logs bit-identical to 2.14.0. MuJoCo is
-*not* downgraded -- 3.2.7's plugins fail on that CPU too, so the version is not
-the problem. Only `obj_decoder` and `stl_decoder` are needed, to read the
-MyoSuite meshes; `elasticity`, `sdf_plugin`, `actuator` and `sensor` are not,
-and the script moves them to `plugin_disabled/` rather than deleting them.
+Three pins differ: `torch==2.5.1`, `mujoco==3.3.0` and `myosuite==2.11.6`.
+
+MuJoCo has to be downgraded, and the reason is specific. 3.6 bundles
+`obj_decoder` and `stl_decoder`, and on that CPU *those* are among the plugins
+that will not initialise -- so pruning cannot help, because the MyoSuite meshes
+cannot be read without them. 3.3 decodes meshes in the core and bundles only
+`actuator`, `elasticity`, `sdf` and `sensor`, none of which this project uses,
+so there all four are prunable. Downgrading mujoco forces myosuite down with
+it, since 2.12.2 requires `mujoco>=3.6,<3.7`.
+
+All three were verified rather than assumed. On mujoco 3.3.0 / myosuite 2.11.6
+/ torch 2.5.1 the compiled model is identical in what matters -- nq 49, nv 49,
+nu 290, the same root qpos addresses, the same 0.907292 m solved standing
+pelvis height -- all 118 tests pass, and `--seed 7` produces iteration logs
+bit-identical to the current stack.
+
+`_build_model` was changed to make this possible: it repurposes the free root
+joint as the first planar joint and empties the keyframe, instead of deleting
+either. `spec.delete` does not exist before mujoco 3.6, and no version offers a
+delete method on the element itself, so the previous code only ran on 3.6. One
+code path now covers both.
 
 ### Reproducing a run on another machine
 

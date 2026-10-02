@@ -22,12 +22,15 @@ code then fails. The same wheels work on a 2025 CPU. torch's `c10.dll` fails
 the same way on that machine, and the fix for that one is a version pin
 (`requirements-haswell.txt`); this script is the other half.
 
-**Only two of the six are needed.** `obj_decoder` and `stl_decoder` read the
-MyoSuite meshes -- without them `spec.compile()` fails with "no decoder found
-for mesh file ... sacrum.stl". The model uses no deformables, no
-signed-distance geometry and no plugin actuators or sensors, so `elasticity`,
-`sdf_plugin`, `actuator` and `sensor` can go. Verified by removing them: all
-118 tests still pass.
+**Which plugins can go depends on the MuJoCo version.** This project uses
+none of them directly, but MuJoCo 3.6 bundles `obj_decoder` and `stl_decoder`,
+which read the MyoSuite meshes -- without those, `spec.compile()` fails with
+"no decoder found for mesh file ... sacrum.stl". MuJoCo 3.3 decodes meshes in
+the core and bundles only `actuator`, `elasticity`, `sdf` and `sensor`, so
+there everything is prunable. On the Haswell machine the 3.6 decoders are
+themselves among the failures, which is why `requirements-haswell.txt` pins
+mujoco 3.3 (and myosuite 2.11.6 with it) rather than relying on this script
+alone.
 
 **Which plugin is broken is decided by importing mujoco, not by loading each
 library on its own.** A plugin links against the core `mujoco` library, which
