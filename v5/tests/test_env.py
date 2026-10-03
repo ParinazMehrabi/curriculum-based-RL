@@ -613,6 +613,9 @@ def tracking_env():
         track_reference=True, rsi=True, max_tracking_error=1.50,
         reset_position_std=0.02, reset_velocity_std=0.02,
         weights={"tracking": 1.00},
+        # Stage W starts from a captured state, which takes precedence over
+        # RSI. These tests are about RSI, so it has to be switched off.
+        init_state=None,
     )
     yield e
     e.close()

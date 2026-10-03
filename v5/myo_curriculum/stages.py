@@ -18,7 +18,7 @@ new:
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Dict, Mapping, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 from .rewards import ADDITIVE, GEOMETRIC, RewardSpec
 
@@ -79,6 +79,20 @@ class StageSpec:
     track_reference: bool = False
     rsi: bool = False
     rsi_velocity_scale: float = 0.0
+
+    # A captured initial state, by filename under models/init/ or by
+    # path. Supplies pose, joint velocities and muscle activations, and
+    # takes precedence over rsi and over initial_forward_velocity.
+    #
+    # Needed because the model is exactly left/right symmetric and so is
+    # a deterministic policy's response to a symmetric observation. From
+    # a standing start both legs hold identical angles, velocities and
+    # activations, the two sides of the network see mirror-identical
+    # input, and nothing in the reward breaks the tie: the result hops
+    # rather than steps. Reset noise breaks it only by accident, a
+    # little, and differently every episode -- and stage W sets that
+    # noise to zero, which made it exact.
+    init_state: Optional[str] = None
     # Terminate when the RMS joint deviation from the reference exceeds this,
     # so the policy never banks return from a desynced state. None disables it.
     #
@@ -339,6 +353,10 @@ STAGE_W = StageSpec(
     track_reference=False,
     rsi=False,
     max_tracking_error=None,    # nothing to be off by
+    # Asymmetric by construction: right-leg stance just after contact,
+    # left leg at toe-off, already travelling at 1.08 m/s. The one pose
+    # below is this state, not a standing one. See init_state.py.
+    init_state="InitStateH0918Gait10ActA.zml",
     # One pose, exactly. The reset noise is zero, so the only variation between
     # episodes is the policy's own action sampling.
     reset_position_std=0.0,

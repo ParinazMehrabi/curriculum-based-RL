@@ -433,20 +433,70 @@ Holding the stance is stage A's job, not the reset's.
 
 | | asked for | implemented | when |
 |---|---|---|---|
-| falling | big penalty | early termination + `fall_penalty = 5.0` | on fall |
+| falling | big penalty | early termination, `fall_penalty = 0` | on fall |
 | surviving 10 s | 0.1 | `alive = 0.10`/step over 1000 steps | per step |
-| following the trajectory | 0.2 | reference tracking, weight 0.20 | per step |
-| moving forward | 0.7 | `0.70 × 1000 × smoothstep(travel, 0, 1 m)` | **at the end** |
+| following the trajectory | 0.2 | removed; the 0.20 weights `effort` | per step |
+| moving forward | 0.7 | `0.70 × 1000 × travel / 1 m`, uncapped | **at the end** |
+| flying | -- | `10.0` per metre of COM above 1.10 m | per step |
+| going backwards | -- | the forward term, at 4× the rate | **at the end** |
 
 ```
-per step    alive 0.10  +  tracking 0.20                        =    0.30
-at the end  forward 0.70 × 1000 × smoothstep(travel, 0, 1.0 m)  =  ≤ 700
---------------------------------------------------------------------------
-a perfect 10 s episode                                          =   1000
+per step    alive 0.10  +  effort 0.20   -  fly              =    0.30
+at the end  forward 0.70 × 1000 × travel / 1.0 m             =    700 per metre
+----------------------------------------------------------------------------
+10 s covering the reference metre                            =   1000
 ```
 
-Same proportions as a flat 1.0/step reward -- alive 100, tracking 200, forward
-700 -- with the forward share moved to the end.
+1000 is a reference point, not a maximum: forward progress is linear and has
+no ceiling, so two metres pays 1400. Retreating is charged at four times the
+rate it earns, because at parity a policy that toppled 0.27 m backwards scored
+about the same as one that stood still, and kept choosing it.
+
+### The start is one captured state, not a standing pose
+
+`models/init/InitStateH0918Gait10ActA.zml`, a gait10dof18musc state taken
+mid-stride. **The model is exactly left/right symmetric, and so is a
+deterministic policy's response to a symmetric observation.** From a standing
+start both legs hold identical angles, identical velocities and identical
+activations, both halves of the network see mirror-identical input and emit
+mirror-identical output, and nothing in the reward breaks the tie. Such a
+policy can hop. It cannot step.
+
+Reset noise breaks the symmetry only by accident, slightly, and differently
+every episode -- and stage W sets that noise to zero, which made the tie
+exact. The captured state breaks it on purpose and reproducibly, in all three
+places at once:
+
+| | right | left | difference |
+|---|---|---|---|
+| hip_flexion | +0.439 rad | +0.199 rad | 0.24 rad |
+| knee_angle | +0.394 rad | +1.038 rad | 0.64 rad |
+| hip_flexion velocity | -1.36 rad/s | +3.34 rad/s | 4.70 rad/s |
+| knee_angle velocity | -0.27 rad/s | +3.15 rad/s | 3.42 rad/s |
+| vasti activation | 0.484 | 0.011 | 0.47 |
+| iliopsoas activation | 0.054 | 0.290 | 0.24 |
+
+Read together: right-leg stance just after contact, left leg at toe-off, the
+pelvis already travelling at 1.08 m/s. The captured pelvis height puts the
+left toe on the floor, the right foot 9-13 mm above it and the left heel
+174 mm up, so the height is applied as given rather than seated -- seating
+would move it 0.1 mm and discard part of the state.
+
+It is still exactly one state: every episode starts bit-identical, and the
+only variation between them is the policy's own action sampling.
+
+Measured effect before any learning. A zero-action rollout from the standing
+pose toppled 0.28 m **backwards** for a return of -36; from this state it
+carries +0.42 m **forward** for +24.
+
+`init_state.py` documents the mapping. Three things in it are not identities,
+all the same OpenSim-to-Rajagopal corrections `reference.py` makes:
+`pelvis_tilt` and both knees are negated, and `pelvis_ty` is an absolute
+height rather than a joint value. Velocities are negated wherever their
+coordinate is -- getting only the angles right would start the model in the
+right pose moving the wrong way. The file's nine lumped muscles per leg
+expand onto the 34 MyoSuite actuators that make them up; the other 256 keep
+the stage's `initial_activation`.
 
 Three departures from the literal spec, each for a reason:
 

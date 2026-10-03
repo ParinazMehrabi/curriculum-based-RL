@@ -73,6 +73,7 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise ImportError("v5 needs gymnasium: pip install gymnasium") from exc
 
+from .init_state import InitState, load_init_state, resolve_init_state
 from .reference import TRACKED_JOINTS, Reference
 from .rewards import gaussian, smoothstep
 from .stages import StageSpec, get_stage
@@ -248,6 +249,17 @@ class MyoLocomotionEnv(gym.Env):
         self._tracked_qadr = [self.qadr[n] for n in TRACKED_JOINTS]
         if self.stage_spec.track_reference:
             self.reference = Reference()
+
+        # A captured initial state, loaded only when a stage asks for one.
+        self.init_state: Optional[InitState] = None
+        if self.stage_spec.init_state:
+            self.init_state = load_init_state(
+                resolve_init_state(self.stage_spec.init_state)
+            )
+        self.actuator_index = {
+            mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i): i
+            for i in range(self.model.nu)
+        }
 
 
         self.render_mode = render_mode
@@ -736,6 +748,28 @@ class MyoLocomotionEnv(gym.Env):
         mujoco.mj_forward(self.model, self.data)
         return float(lowest)
 
+    def apply_init_state(self) -> None:
+        """Pose and velocity from the captured state, in this model's terms.
+
+        Joint angles, then the absolute pelvis height, then joint velocities.
+        Height is applied after the angles because `set_pelvis_height` solves
+        for the slide offset against the pose as it stands -- the pelvis COM
+        moves when `pelvis_tilt` does.
+
+        Only the dofs the file names are touched. The ones it has nothing to
+        say about -- `flex_extension`, `mtp_angle_r`, `mtp_angle_l` -- keep the
+        solved standing stance's values, which is the right default for a
+        trunk and toes that a 9-dof planar record does not model.
+        """
+        state = self.init_state
+        for joint, value in state.joint_positions().items():
+            self.data.qpos[self.qadr[joint]] = value
+        if state.pelvis_height is not None:
+            self.set_pelvis_height(state.pelvis_height)
+        for joint, value in state.joint_velocities().items():
+            self.data.qvel[self.dadr[joint]] = value
+        mujoco.mj_forward(self.model, self.data)
+
     def apply_reference_pose(self, phase: float) -> None:
         """Pose the tracked joints at a phase of the reference gait.
 
@@ -865,7 +899,35 @@ class MyoLocomotionEnv(gym.Env):
         self.data.qpos[:] = self._neutral_qpos
         self.data.qvel[:] = 0.0
 
-        if spec.rsi and self.reference is not None:
+        if self.init_state is not None:
+            # A captured mid-stride state. The model is left/right symmetric
+            # and so is a deterministic policy's response to a symmetric
+            # observation, so a standing start gives both legs identical
+            # angles, velocities and activations and the two sides of the
+            # network cannot diverge: it can hop, not step. This breaks the
+            # symmetry on purpose, in pose, velocity and activation at once.
+            self.ref_phase = 0.0
+            self.apply_init_state()
+            for name in INDEPENDENT_JOINTS:
+                self.data.qpos[self.qadr[name]] += self.rng.normal(
+                    0.0, spec.reset_position_std
+                )
+                self.data.qvel[self.dadr[name]] += self.rng.normal(
+                    0.0, spec.reset_velocity_std
+                )
+            mujoco.mj_forward(self.model, self.data)
+            # Only lift out of the floor, never seat onto it: the captured
+            # height is part of the state. Measured on this file it puts the
+            # left toe 0.1 mm up, the right foot 9-13 mm up and the left heel
+            # 174 mm up -- left toe-off with the right foot about to land --
+            # and seating would move the pelvis by 0.1 mm and say nothing.
+            lowest = min(
+                min(self._heel_z(foot), self._toe_z(foot)) for foot in FOOT_BODIES
+            )
+            if lowest < 0.0:
+                self.data.qpos[self.qadr["pelvis_ty"]] -= lowest
+                mujoco.mj_forward(self.model, self.data)
+        elif spec.rsi and self.reference is not None:
             # Reference-state initialisation: start at a random phase of
             # the gait. The feet are not forced flat -- that would corrupt a
             # mid-swing frame -- only stood on whichever contact point is
@@ -899,7 +961,11 @@ class MyoLocomotionEnv(gym.Env):
             self._seat_feet()
             self.seat_lowest_contact()
 
-        if spec.initial_forward_velocity > 0.0:
+        # Skipped when a captured state is in use: it carries its own forward
+        # velocity, 1.08 m/s in the shipped file, and overwriting that with a
+        # nominal 0.10 would contradict the pose and the joint velocities it
+        # came with.
+        if self.init_state is None and spec.initial_forward_velocity > 0.0:
             speed = max(
                 0.0,
                 float(
@@ -914,6 +980,18 @@ class MyoLocomotionEnv(gym.Env):
         if self.model.na:
             self.data.act[:] = spec.initial_activation
         self.data.ctrl[:] = spec.initial_activation
+        if self.init_state is not None:
+            # The stage default first, then the file over it: the 34 actuators
+            # the file names get its values, the other 256 keep the default.
+            # `ctrl` is set to match `act`, so the first step holds the
+            # captured activation instead of relaxing towards a uniform one.
+            for name, value in self.init_state.muscle_activations().items():
+                index = self.actuator_index.get(name)
+                if index is None:
+                    continue
+                if self.model.na:
+                    self.data.act[index] = value
+                self.data.ctrl[index] = value
         self.prev_action[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
 

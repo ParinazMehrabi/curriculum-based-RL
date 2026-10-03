@@ -220,14 +220,23 @@ def test_falling_adds_no_penalty_of_its_own(env):
     ordinary = reward - env.terminal_bonus
     assert 0.0 <= ordinary <= per_step_max, ordinary
     assert env.terminal_bonus == pytest.approx(env.forward_bonus())
-    # and that payment tracks the distance, rather than being a fixed penalty
-    assert env.travel < 0.0, "this policy is expected to topple backwards"
-    assert env.terminal_bonus < 0.0
-    scale = (STAGE_W.forward_bonus * STAGE_W.episode_steps
-             / STAGE_W.forward_reference_distance)
+
+    # and that payment tracks the distance, rather than being a fixed penalty.
+    # Which way it travelled is not asserted: with the captured initial state
+    # the model carries 1.08 m/s forward, so even a limp zero-action rollout
+    # covers about +0.42 m before falling, where from a standing start it
+    # toppled backwards. The sign of the payment has to follow the travel
+    # either way, at the backward rate only when going backwards.
+    assert env.travel != 0.0
+    rate = (STAGE_W.forward_bonus * STAGE_W.episode_steps
+            / STAGE_W.forward_reference_distance)
+    if env.travel < 0.0:
+        rate *= STAGE_W.backward_multiplier
+        assert env.terminal_bonus < 0.0
+    else:
+        assert env.terminal_bonus > 0.0
     assert env.terminal_bonus == pytest.approx(
-        scale * env.travel * STAGE_W.backward_multiplier
-        * env.steps / STAGE_W.episode_steps
+        rate * env.travel * env.steps / STAGE_W.episode_steps
     )
 
 
